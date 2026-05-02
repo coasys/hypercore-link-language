@@ -9,6 +9,7 @@ AD4M link language that syncs Perspective triples via an HTTP sidecar gateway ba
 - **Query:** indexed local store (source, target, predicate)
 - **P2P replication:** Hyperswarm DHT for peer discovery and feed replication
 - **Sidecar pattern:** a Node.js gateway process handles Hyperswarm; the language talks HTTP
+- **Telepresence:** peer presence tracking and signalling via Hyperswarm connections through the sidecar gateway
 
 ## Template Variables
 
@@ -35,7 +36,7 @@ Requires `@coasys/ad4m-ldk` at `../ad4m/ad4m-ldk/js/` or set `AD4M_LDK_ENTRY`.
 node --experimental-vm-modules --import tsx --test tests/*.test.ts
 ```
 
-239 tests across 11 suites.
+281 tests across 12 suites.
 
 ## Architecture
 
