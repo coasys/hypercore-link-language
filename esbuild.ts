@@ -18,7 +18,7 @@ const ad4mLdkAliasPlugin = {
     }));
     // Resolve @coasys/ad4m-ldk to the local workspace build
     build.onResolve({ filter: /^@coasys\/ad4m-ldk$/ }, () => ({
-      path: ad4mLdkEntry,
+      path: resolve(projectRoot, ad4mLdkEntry),
       namespace: "file",
     }));
   },
