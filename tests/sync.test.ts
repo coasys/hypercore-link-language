@@ -11,7 +11,9 @@ import type { RuntimeAdapter } from "../src/runtime-interface.js";
 import { initRuntime } from "../src/runtime-interface.js";
 
 import * as store from "../src/store.js";
-import { sync, bufferBlock, clearBuffer, getBufferSize, handleInboundSignal } from "../src/sync.js";
+import { sync, syncFromBuffer, bufferBlock, clearBuffer, getBufferSize, handleInboundSignal } from "../src/sync.js";
+import { initTransport } from "../src/transport.js";
+import type { Transport, TransportResponse } from "../src/transport.js";
 import { serializeCommitBlock } from "../src/commit-block.pure.js";
 import type { HypercoreCommitBlock } from "../src/commit-block.pure.js";
 import type { LinkExpression } from "../src/types.js";
@@ -96,6 +98,12 @@ describe("Sync module", () => {
     beforeEach(() => {
         initStorage(new MockStorageAdapter());
         initRuntime(new MockRuntime());
+        // Init a no-op transport so getGateway() returns null (signal mode)
+        initTransport({
+            async fetch(): Promise<TransportResponse> {
+                return { status: 200, headers: {}, body: '{}' };
+            }
+        });
         store.initStore();
         clearBuffer();
     });
@@ -127,9 +135,104 @@ describe("Sync module", () => {
     // sync()
     // -----------------------------------------------------------------------
 
-    describe("sync()", () => {
+    describe("sync() — async gateway-aware", () => {
+        it("returns empty diff for empty buffer", async () => {
+            const diff = await sync();
+            assert.equal(diff.additions.length, 0);
+            assert.equal(diff.removals.length, 0);
+        });
+
+        it("processes single block", async () => {
+            const link = makeLinkExpression();
+            bufferBlock(makeBlockSignal(0, makeBlock(0, [link])));
+
+            const diff = await sync();
+            assert.equal(diff.additions.length, 1);
+            assert.equal(diff.additions[0].data.source, "literal://hello");
+        });
+
+        it("processes multiple blocks", async () => {
+            const link1 = makeLinkExpression();
+            const link2 = makeLinkExpression({ timestamp: "2026-05-02T01:00:00.000Z" });
+            bufferBlock(makeBlockSignal(0, makeBlock(0, [link1])));
+            bufferBlock(makeBlockSignal(1, makeBlock(1, [link2])));
+
+            const diff = await sync();
+            assert.equal(diff.additions.length, 2);
+        });
+
+        it("drains the buffer after sync", async () => {
+            bufferBlock(makeBlockSignal(0, makeBlock(0, [makeLinkExpression()])));
+            await sync();
+            assert.equal(getBufferSize(), 0);
+        });
+
+        it("deduplicates by sequence number", async () => {
+            const block = makeBlock(0, [makeLinkExpression()]);
+            bufferBlock(makeBlockSignal(0, block));
+            bufferBlock(makeBlockSignal(0, block));
+            bufferBlock(makeBlockSignal(0, block));
+
+            const diff = await sync();
+            assert.equal(diff.additions.length, 1);
+        });
+
+        it("does not reprocess already-processed blocks", async () => {
+            const block = makeBlock(0, [makeLinkExpression()]);
+            bufferBlock(makeBlockSignal(0, block));
+            await sync(); // Process block 0
+
+            // Buffer the same block again
+            bufferBlock(makeBlockSignal(0, block));
+            const diff = await sync();
+            assert.equal(diff.additions.length, 0);
+        });
+
+        it("handles removals", async () => {
+            const link = makeLinkExpression();
+            store.putLink(link);
+
+            bufferBlock(makeBlockSignal(0, makeBlock(0, [], [link])));
+            const diff = await sync();
+
+            assert.equal(diff.removals.length, 1);
+            assert.equal(store.getLink(store.hashLink(link)), null);
+        });
+
+        it("sorts blocks by sequence", async () => {
+            const link1 = makeLinkExpression({ data: { source: "first", target: "t", predicate: "p" } });
+            const link2 = makeLinkExpression({ data: { source: "second", target: "t", predicate: "p" } });
+
+            // Buffer out of order
+            bufferBlock(makeBlockSignal(1, makeBlock(1, [link2])));
+            bufferBlock(makeBlockSignal(0, makeBlock(0, [link1])));
+
+            const diff = await sync();
+            assert.equal(diff.additions.length, 2);
+            // First addition should be from seq 0
+            assert.equal(diff.additions[0].data.source, "first");
+        });
+
+        it("updates revision to latest sequence", async () => {
+            bufferBlock(makeBlockSignal(0, makeBlock(0, [makeLinkExpression()])));
+            bufferBlock(makeBlockSignal(5, makeBlock(5, [makeLinkExpression({ timestamp: "2026-05-02T05:00:00.000Z" })])));
+
+            await sync();
+            assert.equal(store.getRevision(), "5");
+        });
+
+        it("skips invalid block data", async () => {
+            bufferBlock(makeBlockSignal(0, "not valid json"));
+            bufferBlock(makeBlockSignal(1, makeBlock(1, [makeLinkExpression()])));
+
+            const diff = await sync();
+            assert.equal(diff.additions.length, 1); // Only block 1 processed
+        });
+    });
+
+    describe("syncFromBuffer() — synchronous buffer drain", () => {
         it("returns empty diff for empty buffer", () => {
-            const diff = sync();
+            const diff = syncFromBuffer();
             assert.equal(diff.additions.length, 0);
             assert.equal(diff.removals.length, 0);
         });
@@ -138,87 +241,9 @@ describe("Sync module", () => {
             const link = makeLinkExpression();
             bufferBlock(makeBlockSignal(0, makeBlock(0, [link])));
 
-            const diff = sync();
+            const diff = syncFromBuffer();
             assert.equal(diff.additions.length, 1);
             assert.equal(diff.additions[0].data.source, "literal://hello");
-        });
-
-        it("processes multiple blocks", () => {
-            const link1 = makeLinkExpression();
-            const link2 = makeLinkExpression({ timestamp: "2026-05-02T01:00:00.000Z" });
-            bufferBlock(makeBlockSignal(0, makeBlock(0, [link1])));
-            bufferBlock(makeBlockSignal(1, makeBlock(1, [link2])));
-
-            const diff = sync();
-            assert.equal(diff.additions.length, 2);
-        });
-
-        it("drains the buffer after sync", () => {
-            bufferBlock(makeBlockSignal(0, makeBlock(0, [makeLinkExpression()])));
-            sync();
-            assert.equal(getBufferSize(), 0);
-        });
-
-        it("deduplicates by sequence number", () => {
-            const block = makeBlock(0, [makeLinkExpression()]);
-            bufferBlock(makeBlockSignal(0, block));
-            bufferBlock(makeBlockSignal(0, block));
-            bufferBlock(makeBlockSignal(0, block));
-
-            const diff = sync();
-            assert.equal(diff.additions.length, 1);
-        });
-
-        it("does not reprocess already-processed blocks", () => {
-            const block = makeBlock(0, [makeLinkExpression()]);
-            bufferBlock(makeBlockSignal(0, block));
-            sync(); // Process block 0
-
-            // Buffer the same block again
-            bufferBlock(makeBlockSignal(0, block));
-            const diff = sync();
-            assert.equal(diff.additions.length, 0);
-        });
-
-        it("handles removals", () => {
-            const link = makeLinkExpression();
-            store.putLink(link);
-
-            bufferBlock(makeBlockSignal(0, makeBlock(0, [], [link])));
-            const diff = sync();
-
-            assert.equal(diff.removals.length, 1);
-            assert.equal(store.getLink(store.hashLink(link)), null);
-        });
-
-        it("sorts blocks by sequence", () => {
-            const link1 = makeLinkExpression({ data: { source: "first", target: "t", predicate: "p" } });
-            const link2 = makeLinkExpression({ data: { source: "second", target: "t", predicate: "p" } });
-
-            // Buffer out of order
-            bufferBlock(makeBlockSignal(1, makeBlock(1, [link2])));
-            bufferBlock(makeBlockSignal(0, makeBlock(0, [link1])));
-
-            const diff = sync();
-            assert.equal(diff.additions.length, 2);
-            // First addition should be from seq 0
-            assert.equal(diff.additions[0].data.source, "first");
-        });
-
-        it("updates revision to latest sequence", () => {
-            bufferBlock(makeBlockSignal(0, makeBlock(0, [makeLinkExpression()])));
-            bufferBlock(makeBlockSignal(5, makeBlock(5, [makeLinkExpression({ timestamp: "2026-05-02T05:00:00.000Z" })])));
-
-            sync();
-            assert.equal(store.getRevision(), "5");
-        });
-
-        it("skips invalid block data", () => {
-            bufferBlock(makeBlockSignal(0, "not valid json"));
-            bufferBlock(makeBlockSignal(1, makeBlock(1, [makeLinkExpression()])));
-
-            const diff = sync();
-            assert.equal(diff.additions.length, 1); // Only block 1 processed
         });
     });
 

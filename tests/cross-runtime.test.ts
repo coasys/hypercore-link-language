@@ -411,7 +411,7 @@ describe("Cross-runtime: Translation", () => {
 describe("Cross-runtime: Sync pipeline", () => {
     beforeEach(() => initAllAdapters());
 
-    it("full round-trip: link → commit block → buffer → sync → link", () => {
+    it("full round-trip: link → commit block → buffer → sync → link", async () => {
         // 1. Create a link and build commit block
         const original = makeLinkExpression();
         const diff: PerspectiveDiff = { additions: [original], removals: [] };
@@ -423,7 +423,7 @@ describe("Cross-runtime: Sync pipeline", () => {
 
         // 3. Buffer and sync
         bufferBlock(blockSignal);
-        const syncDiff = sync();
+        const syncDiff = await sync();
 
         // 4. Verify round-trip
         assert.equal(syncDiff.additions.length, 1);
@@ -435,7 +435,7 @@ describe("Cross-runtime: Sync pipeline", () => {
         assert.equal(roundTripped.proof.signature, original.proof.signature);
     });
 
-    it("deduplicates blocks from multiple peers", () => {
+    it("deduplicates blocks from multiple peers", async () => {
         const block: HypercoreCommitBlock = {
             type: "ad4m:PerspectiveDiff",
             seq: 0,
@@ -451,11 +451,11 @@ describe("Cross-runtime: Sync pipeline", () => {
         bufferBlock(makeBlockSignal(0, serialized));
         bufferBlock(makeBlockSignal(0, serialized));
 
-        const diff = sync();
+        const diff = await sync();
         assert.equal(diff.additions.length, 1);
     });
 
-    it("processes blocks in sequence order", () => {
+    it("processes blocks in sequence order", async () => {
         const block0 = serializeCommitBlock({
             type: "ad4m:PerspectiveDiff",
             seq: 0,
@@ -477,11 +477,11 @@ describe("Cross-runtime: Sync pipeline", () => {
         bufferBlock(makeBlockSignal(1, block1));
         bufferBlock(makeBlockSignal(0, block0));
 
-        const diff = sync();
+        const diff = await sync();
         assert.equal(diff.additions.length, 2);
     });
 
-    it("handles removals in commit blocks", () => {
+    it("handles removals in commit blocks", async () => {
         // First, add a link
         const link = makeLinkExpression();
         store.putLink(link);
@@ -497,13 +497,13 @@ describe("Cross-runtime: Sync pipeline", () => {
         });
 
         bufferBlock(makeBlockSignal(0, removalBlock));
-        const diff = sync();
+        const diff = await sync();
 
         assert.equal(diff.removals.length, 1);
         assert.equal(store.getLink(store.hashLink(link)), null);
     });
 
-    it("updates revision after sync", () => {
+    it("updates revision after sync", async () => {
         const block = serializeCommitBlock({
             type: "ad4m:PerspectiveDiff",
             seq: 5,
@@ -514,12 +514,12 @@ describe("Cross-runtime: Sync pipeline", () => {
         });
 
         bufferBlock(makeBlockSignal(5, block));
-        sync();
+        await sync();
 
         assert.equal(store.getRevision(), "5");
     });
 
-    it("tracks remote peers", () => {
+    it("tracks remote peers", async () => {
         const block = serializeCommitBlock({
             type: "ad4m:PerspectiveDiff",
             seq: 0,
@@ -530,14 +530,14 @@ describe("Cross-runtime: Sync pipeline", () => {
         });
 
         bufferBlock(makeBlockSignal(0, block));
-        sync();
+        await sync();
 
         const peers = store.listPeers();
         assert.ok(peers.includes("did:key:z6MkRemote"));
     });
 
-    it("empty buffer returns empty diff", () => {
-        const diff = sync();
+    it("empty buffer returns empty diff", async () => {
+        const diff = await sync();
         assert.equal(diff.additions.length, 0);
         assert.equal(diff.removals.length, 0);
     });

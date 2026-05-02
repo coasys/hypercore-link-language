@@ -7,14 +7,15 @@
  * Implements perspective-commit, perspective-sync, perspective-query,
  * and peers capabilities.
  *
- * Appends links as commit blocks to a Hypercore feed, processes inbound
- * blocks from Hyperswarm replication, and uses Hyperbee B-tree indexes
- * for efficient queries.
+ * Two operating modes:
  *
- * Hypercore/Hyperbee/Hyperswarm are Node.js libraries with native N-API
- * deps. They cannot run directly in the ALDK's Deno runtime. All
- * Hypercore operations are delegated to the executor via signal-based
- * communication.
+ * 1. **Gateway mode** (preferred): A sidecar Node.js process (hypercore-gateway)
+ *    handles native Hypercore/Hyperswarm operations. This language talks to it
+ *    via httpFetch() through the standard AD4M networking API.
+ *    Set HYPERCORE_GATEWAY_URL to enable.
+ *
+ * 2. **Signal mode** (legacy): Hypercore operations are delegated to the executor
+ *    via signal-based communication. Requires executor-side Hypercore support.
  *
  * Spec: hypercore-link-language.md
  */
@@ -35,11 +36,13 @@ import { linkContentKey } from "./src/translate.pure.js";
 import { shouldFederate, linkOriginKey, isPredicateExcluded } from "./src/dual-language.js";
 import * as store from "./src/store.js";
 import { emitAppend, emitJoinSwarm, emitLeaveSwarm } from "./src/signals.js";
-import { sync as doSync, handleInboundSignal, clearBuffer } from "./src/sync.js";
+import { sync as doSync, handleInboundSignal, clearBuffer, setGatewaySync, setLastSyncedSeq } from "./src/sync.js";
 import { initWritersFromSettings } from "./src/membership.js";
+import { serializeCommitBlock } from "./src/commit-block.pure.js";
+import { buildCommitBlock } from "./src/commit-block.js";
 
 // Adapter imports
-import { initTransport } from "./src/transport.js";
+import { initTransport, initGateway, getGateway } from "./src/transport.js";
 import { DenoTransport } from "./src/transport-deno.js";
 import { initStorage, getStorage } from "./src/storage-interface.js";
 import { DenoStorageAdapter } from "./src/storage-deno.js";
@@ -64,6 +67,9 @@ const BOOTSTRAP_NODES = "<to-be-filled>";
 //!@ad4m-template-variable
 const NEIGHBOURHOOD_META = "<to-be-filled>";
 
+//!@ad4m-template-variable
+const HYPERCORE_GATEWAY_URL = "<to-be-filled>";
+
 // ---------------------------------------------------------------------------
 // Module state
 // ---------------------------------------------------------------------------
@@ -74,6 +80,7 @@ let feedKey: string = "";
 let discoveryKey: string = "";
 let currentSeq: number = 0;
 let configured: boolean = true;
+let gatewayMode: boolean = false;
 
 /**
  * Check whether a template variable has been filled in.
@@ -106,7 +113,7 @@ function neighbourhoodUrl(): string {
 
 const language = defineLanguage({
     name: "@hexafield/hypercore-link-language",
-    version: "0.1.0",
+    version: "0.2.0",
 
     isPublic: true,
 
@@ -120,6 +127,66 @@ const language = defineLanguage({
 
         myDid = agentDid();
         settings = parseSettings(languageSettings());
+
+        // Check for gateway mode first
+        const gatewayUrl = HYPERCORE_GATEWAY_URL;
+        if (isTemplateVarFilled(gatewayUrl)) {
+            initGateway(gatewayUrl);
+            gatewayMode = true;
+            console.log(`[hypercore-link-language] init: gateway mode, url=${gatewayUrl}`);
+
+            // Verify gateway connectivity
+            try {
+                const health = await getGateway()!.health();
+                console.log(`[hypercore-link-language] gateway health: ${health.status}, feeds: ${health.feeds}`);
+            } catch (err) {
+                console.error(`[hypercore-link-language] gateway health check failed:`, err);
+                console.warn(`[hypercore-link-language] will retry gateway on first operation`);
+            }
+
+            // Handle feed key: "auto" means create a new feed
+            feedKey = HYPERCORE_KEY || "";
+            discoveryKey = DISCOVERY_KEY || "";
+
+            if (feedKey === "auto" || !isTemplateVarFilled(feedKey)) {
+                try {
+                    const feed = await getGateway()!.createFeed();
+                    feedKey = feed.key;
+                    discoveryKey = feed.discoveryKey;
+                    console.log(`[hypercore-link-language] created new feed: ${feedKey.substring(0, 16)}...`);
+                } catch (err) {
+                    console.error(`[hypercore-link-language] failed to create feed:`, err);
+                    configured = false;
+                    return;
+                }
+            }
+
+            // Start replication if discovery key is available
+            if (discoveryKey && discoveryKey !== "auto" && settings.syncMode !== "publish-only") {
+                try {
+                    await getGateway()!.startReplication(feedKey);
+                    console.log(`[hypercore-link-language] replication started`);
+                } catch (err) {
+                    console.warn(`[hypercore-link-language] replication start failed:`, err);
+                }
+            }
+
+            configured = true;
+
+            // Restore sync cursor from revision
+            const rev = store.getRevision();
+            if (rev) {
+                currentSeq = parseInt(rev, 10) + 1;
+            }
+
+            // Set up gateway-based sync
+            setGatewaySync(feedKey, currentSeq);
+
+            console.log(`[hypercore-link-language] init complete: did=${myDid}, feed=${feedKey.substring(0, 16)}..., seq=${currentSeq}`);
+            return;
+        }
+
+        // Legacy signal-based mode
         feedKey = HYPERCORE_KEY || "";
         discoveryKey = DISCOVERY_KEY || "";
 
@@ -134,7 +201,7 @@ const language = defineLanguage({
         }
 
         configured = true;
-        console.log(`[hypercore-link-language] init: did=${myDid}, feed=${feedKey.substring(0, 16)}...`);
+        console.log(`[hypercore-link-language] init: signal mode, did=${myDid}, feed=${feedKey.substring(0, 16)}...`);
         console.log(`[hypercore-link-language] sync mode: ${settings.syncMode}`);
         console.log(`[hypercore-link-language] multi-writer: ${settings.multiWriter.enabled}`);
 
@@ -165,12 +232,18 @@ const language = defineLanguage({
     },
 
     async teardown() {
-        // Leave Hyperswarm
-        if (configured && discoveryKey) {
+        if (gatewayMode && configured && feedKey) {
+            // Stop replication gracefully
+            try {
+                await getGateway()!.stopReplication(feedKey);
+            } catch { /* ignore */ }
+        } else if (configured && discoveryKey) {
+            // Legacy: leave Hyperswarm
             emitLeaveSwarm(discoveryKey);
         }
         myDid = "";
         currentSeq = 0;
+        gatewayMode = false;
         console.log("[hypercore-link-language] teardown");
     },
 
@@ -201,12 +274,10 @@ const language = defineLanguage({
 
             // 3. Build federation filter using dual-language origin tracking
             const shouldCommit = (linkHash: string, link: LinkExpression): boolean => {
-                // Dual-language echo prevention
                 if (settings.dualLanguage.enabled) {
                     if (!shouldFederate(linkHash, (key) => getStorage().get(key))) {
                         return false;
                     }
-                    // Check predicate exclusions
                     const pred = link.data.predicate || "";
                     if (isPredicateExcluded(pred, settings.dualLanguage.excludePredicates)) {
                         return false;
@@ -219,18 +290,70 @@ const language = defineLanguage({
             if (settings.dualLanguage.enabled) {
                 for (const link of diff.additions) {
                     const h = store.hashLink(link);
-                    const originKey = linkOriginKey(h);
+                    const originKey_ = linkOriginKey(h);
                     const storage = getStorage();
-                    const existing = storage.get(originKey);
+                    const existing = storage.get(originKey_);
                     if (existing === "hypercore") {
-                        storage.put(originKey, "dual");
+                        storage.put(originKey_, "dual");
                     } else if (!existing) {
-                        storage.put(originKey, "native");
+                        storage.put(originKey_, "native");
                     }
                 }
             }
 
-            // 5. Build and serialize the commit block
+            // 5. Gateway mode: serialize commit block and POST to gateway
+            if (gatewayMode) {
+                const gateway = getGateway();
+                if (!gateway) {
+                    console.error("[hypercore-link-language] gateway not available for commit");
+                    emitPerspectiveDiff(diff);
+                    return "";
+                }
+
+                // Filter additions/removals through shouldCommit
+                let additions = diff.additions;
+                let removals = diff.removals;
+
+                if (settings.dualLanguage.enabled) {
+                    additions = additions.filter(link => {
+                        const h = store.hashLink(link);
+                        return shouldCommit(h, link);
+                    });
+                    removals = removals.filter(link => {
+                        const h = store.hashLink(link);
+                        return shouldCommit(h, link);
+                    });
+                }
+
+                if (additions.length === 0 && removals.length === 0) {
+                    emitPerspectiveDiff(diff);
+                    return "";
+                }
+
+                // Build the commit block
+                const block = buildCommitBlock(
+                    { additions, removals },
+                    currentSeq,
+                    myDid,
+                );
+                const serialized = serializeCommitBlock(block);
+
+                try {
+                    const result = await gateway.append(feedKey, serialized);
+                    currentSeq = result.seq + 1;
+                    store.setRevision(result.seq.toString());
+                    store.setBlockProcessed(result.seq);
+                    setLastSyncedSeq(currentSeq);
+                    console.log(`[hypercore-link-language] committed block seq=${result.seq} (${result.byteLength} bytes)`);
+                } catch (err) {
+                    console.error(`[hypercore-link-language] gateway append failed:`, err);
+                }
+
+                emitPerspectiveDiff(diff);
+                return "";
+            }
+
+            // 6. Legacy signal mode: build and serialize the commit block
             const result = commitDiff(diff, {
                 seq: currentSeq,
                 author: myDid,
@@ -238,7 +361,6 @@ const language = defineLanguage({
                 shouldCommit,
             });
 
-            // 6. Append to feed via signal delegation
             if (result) {
                 emitAppend(feedKey, result.serialized, currentSeq);
                 currentSeq++;
@@ -352,15 +474,14 @@ export function linkSyncAddSyncStateChangeCallback(callback: (state: string) => 
 }
 
 // ---------------------------------------------------------------------------
-// Signal handler
+// Signal handler (legacy mode — still functional for backward compatibility)
 // ---------------------------------------------------------------------------
 
 /**
  * Handle signals emitted by the executor.
  *
- * The executor forwards inbound Hypercore/Hyperswarm events as signals:
- * { type: "hypercore:block", feedKey, seq, data, author, remote }
- * { type: "hyperswarm:peer", action, peerKey, feedKey }
+ * In gateway mode, this is largely unused since sync() fetches from the
+ * HTTP API. Kept for backward compatibility with signal-based executors.
  */
 export async function handleSignal(signalData: string): Promise<void> {
     let signal: unknown;
@@ -373,7 +494,6 @@ export async function handleSignal(signalData: string): Promise<void> {
     const result = handleInboundSignal(signal);
 
     if (result.kind === "block" && linkCallback) {
-        // Immediately process the block and notify via callback
         const blockData = result.block.data;
         const { deserializeCommitBlock } = await import("./src/commit-block.pure.js");
         const commitBlock = deserializeCommitBlock(blockData);

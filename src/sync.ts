@@ -1,12 +1,9 @@
 /**
- * Sync coordination — processes new blocks received via signals.
+ * Sync coordination — processes new blocks, from either signals or gateway.
  *
- * Since Hypercore operations are delegated to the executor, sync works by:
- * 1. Accumulating blocks received via handleSignal() between sync() calls
- * 2. On sync(), drain the block buffer
- * 3. Deserialize blocks into commit blocks
- * 4. Translate commit blocks into PerspectiveDiffs
- * 5. Deduplicate and return accumulated diff
+ * Two modes:
+ * 1. Signal-based (legacy): blocks arrive via handleSignal(), buffered, drained on sync()
+ * 2. Gateway-based: sync() fetches new entries from the HTTP gateway
  *
  * Uses injected interfaces — no ad4m:host imports.
  */
@@ -17,9 +14,11 @@ import { deserializeCommitBlock } from "./commit-block.pure.js";
 import { blockToPerspectiveDiff } from "./translate.pure.js";
 import * as store from "./store.js";
 import type { BlockSignal, PeerSignal } from "./signals.pure.js";
+import { getGateway } from "./transport.js";
+import type { Entry } from "./transport.js";
 
 // ---------------------------------------------------------------------------
-// Block buffer
+// Block buffer (signal-based mode)
 // ---------------------------------------------------------------------------
 
 let _blockBuffer: BlockSignal[] = [];
@@ -47,16 +46,116 @@ export function clearBuffer(): void {
 }
 
 // ---------------------------------------------------------------------------
-// Sync
+// Gateway sync state
+// ---------------------------------------------------------------------------
+
+let _gatewayFeedKey: string = "";
+let _lastSyncedSeq: number = 0;
+
+/**
+ * Configure gateway-based sync with a feed key.
+ */
+export function setGatewaySync(feedKey: string, startSeq: number = 0): void {
+    _gatewayFeedKey = feedKey;
+    _lastSyncedSeq = startSeq;
+}
+
+/**
+ * Get the last synced sequence number (for gateway mode).
+ */
+export function getLastSyncedSeq(): number {
+    return _lastSyncedSeq;
+}
+
+/**
+ * Set the last synced sequence (e.g. after a commit).
+ */
+export function setLastSyncedSeq(seq: number): void {
+    _lastSyncedSeq = seq;
+}
+
+// ---------------------------------------------------------------------------
+// Shared: process entries into a diff
+// ---------------------------------------------------------------------------
+
+function processEntries(entries: { seq: number; data: string }[]): PerspectiveDiff {
+    const allAdditions: LinkExpression[] = [];
+    const allRemovals: LinkExpression[] = [];
+
+    for (const entry of entries) {
+        if (store.isBlockProcessed(entry.seq)) continue;
+
+        const commitBlock = deserializeCommitBlock(entry.data);
+        if (!commitBlock) {
+            console.log(`[hypercore-link-language] failed to parse block seq=${entry.seq}`);
+            continue;
+        }
+
+        const diff = blockToPerspectiveDiff(commitBlock);
+
+        // Store links
+        for (const addition of diff.additions) {
+            store.putLink(addition);
+        }
+        for (const removal of diff.removals) {
+            store.removeLink(removal);
+        }
+
+        allAdditions.push(...diff.additions);
+        allRemovals.push(...diff.removals);
+
+        // Mark block as processed
+        store.setBlockProcessed(entry.seq);
+    }
+
+    return { additions: allAdditions, removals: allRemovals };
+}
+
+// ---------------------------------------------------------------------------
+// Sync (unified)
 // ---------------------------------------------------------------------------
 
 /**
- * Drain the block buffer, process blocks, store links, return diff.
- *
- * Deduplicates blocks by sequence number to handle potential duplicate
- * delivery from multiple peers.
+ * Drain the block buffer and/or fetch from gateway, process blocks,
+ * store links, return diff.
  */
-export function sync(): PerspectiveDiff {
+export async function sync(): Promise<PerspectiveDiff> {
+    const gateway = getGateway();
+
+    // Gateway mode: fetch new entries from the HTTP sidecar
+    if (gateway && _gatewayFeedKey) {
+        try {
+            const result = await gateway.sync(_gatewayFeedKey, _lastSyncedSeq);
+
+            if (result.entries.length === 0) {
+                return { additions: [], removals: [] };
+            }
+
+            const diff = processEntries(result.entries);
+
+            // Update sync cursor
+            if (result.entries.length > 0) {
+                const maxSeq = Math.max(...result.entries.map(e => e.seq));
+                _lastSyncedSeq = maxSeq + 1;
+                store.setRevision(maxSeq.toString());
+            }
+
+            return diff;
+        } catch (err) {
+            console.error(`[hypercore-link-language] gateway sync error:`, err);
+            // Fall through to signal-based sync as fallback
+        }
+    }
+
+    // Signal-based mode: drain the buffer
+    return syncFromBuffer();
+}
+
+/**
+ * Signal-based sync: drain the block buffer.
+ * This is the original sync path, kept for backward compatibility.
+ */
+export function syncFromBuffer(): PerspectiveDiff {
     // Drain the buffer
     const blocks = _blockBuffer;
     _blockBuffer = [];
@@ -84,33 +183,15 @@ export function sync(): PerspectiveDiff {
     // Sort by sequence number for consistent ordering
     uniqueBlocks.sort((a, b) => a.seq - b.seq);
 
-    const allAdditions: LinkExpression[] = [];
-    const allRemovals: LinkExpression[] = [];
+    const entries = uniqueBlocks.map(b => ({ seq: b.seq, data: b.data }));
+    const diff = processEntries(entries);
 
+    // Update revision to latest sequence
+    const latestSeq = Math.max(...uniqueBlocks.map(b => b.seq));
+    store.setRevision(latestSeq.toString());
+
+    // Track peers from signal metadata
     for (const blockSignal of uniqueBlocks) {
-        const commitBlock = deserializeCommitBlock(blockSignal.data);
-        if (!commitBlock) {
-            console.log(`[hypercore-link-language] failed to parse block seq=${blockSignal.seq}`);
-            continue;
-        }
-
-        const diff = blockToPerspectiveDiff(commitBlock);
-
-        // Store links
-        for (const addition of diff.additions) {
-            store.putLink(addition);
-        }
-        for (const removal of diff.removals) {
-            store.removeLink(removal);
-        }
-
-        allAdditions.push(...diff.additions);
-        allRemovals.push(...diff.removals);
-
-        // Mark block as processed
-        store.setBlockProcessed(blockSignal.seq);
-
-        // Track peer
         if (blockSignal.remote && blockSignal.author) {
             store.setPeer(blockSignal.author, {
                 lastSeen: Date.now(),
@@ -119,12 +200,12 @@ export function sync(): PerspectiveDiff {
         }
     }
 
-    // Update revision to latest sequence
-    const latestSeq = Math.max(...uniqueBlocks.map(b => b.seq));
-    store.setRevision(latestSeq.toString());
-
-    return { additions: allAdditions, removals: allRemovals };
+    return diff;
 }
+
+// ---------------------------------------------------------------------------
+// Inbound signal handler (signal-based mode, unchanged)
+// ---------------------------------------------------------------------------
 
 /**
  * Process a single inbound signal from the executor.
