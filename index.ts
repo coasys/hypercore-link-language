@@ -73,6 +73,14 @@ let settings: HypercoreSettings;
 let feedKey: string = "";
 let discoveryKey: string = "";
 let currentSeq: number = 0;
+let configured: boolean = true;
+
+/**
+ * Check whether a template variable has been filled in.
+ */
+function isTemplateVarFilled(value: string): boolean {
+    return !!value && value !== "<to-be-filled>";
+}
 
 /**
  * Parse bootstrap nodes from the template variable.
@@ -115,6 +123,17 @@ const language = defineLanguage({
         feedKey = HYPERCORE_KEY || "";
         discoveryKey = DISCOVERY_KEY || "";
 
+        // Guard: if critical template vars are unfilled, run in unconfigured mode
+        if (!isTemplateVarFilled(feedKey) || !isTemplateVarFilled(discoveryKey)) {
+            configured = false;
+            console.warn(
+                "[hypercore-link-language] init: template variables not filled — running in unconfigured mode. "
+                + `HYPERCORE_KEY=${JSON.stringify(feedKey)}, DISCOVERY_KEY=${JSON.stringify(discoveryKey)}`
+            );
+            return;
+        }
+
+        configured = true;
         console.log(`[hypercore-link-language] init: did=${myDid}, feed=${feedKey.substring(0, 16)}...`);
         console.log(`[hypercore-link-language] sync mode: ${settings.syncMode}`);
         console.log(`[hypercore-link-language] multi-writer: ${settings.multiWriter.enabled}`);
@@ -147,7 +166,7 @@ const language = defineLanguage({
 
     async teardown() {
         // Leave Hyperswarm
-        if (discoveryKey) {
+        if (configured && discoveryKey) {
             emitLeaveSwarm(discoveryKey);
         }
         myDid = "";
@@ -164,6 +183,13 @@ const language = defineLanguage({
     // -----------------------------------------------------------------------
     commit: {
         async commit(diff: PerspectiveDiff) {
+            // Guard: if not configured, store locally but skip federation
+            if (!configured) {
+                store.applyDiff(diff);
+                emitPerspectiveDiff(diff);
+                return "";
+            }
+
             // 1. Store links locally
             store.applyDiff(diff);
 
@@ -231,7 +257,7 @@ const language = defineLanguage({
     // -----------------------------------------------------------------------
     sync: {
         async sync() {
-            if (settings.syncMode === "publish-only") {
+            if (!configured || settings.syncMode === "publish-only") {
                 return { additions: [], removals: [] };
             }
             return doSync();
