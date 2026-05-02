@@ -1,4 +1,8 @@
 node_modules/
 build/
-deno.lock
+lib/
+*.js
+*.d.ts
 *.js.map
+*.d.ts.map
+!esbuild.ts
