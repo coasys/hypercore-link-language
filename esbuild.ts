@@ -3,7 +3,7 @@ import { denoPlugins } from "https://deno.land/x/esbuild_deno_loader@0.7.0/mod.t
 import { resolve } from "https://deno.land/std@0.177.0/path/mod.ts";
 
 // Resolve `@coasys/ad4m-ldk` to its compiled lib in the workspace.
-const ad4mLdkEntry = "../ad4m/ad4m-ldk/js/lib/index.js";
+const ad4mLdkEntry = process.env.AD4M_LDK_ENTRY || "../ad4m/ad4m-ldk/js/lib/index.js";
 
 // Project root — only resolve .js→.ts within our own source tree
 const projectRoot = new URL(".", import.meta.url).pathname.replace(/\/$/, "");
