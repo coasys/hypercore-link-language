@@ -2,9 +2,11 @@
  * Deno-specific transport implementation.
  * Wraps httpFetch from ad4m:host.
  *
- * Only imported by index.ts — never by core modules or tests.
+ * httpFetch behavior (from executor's host.js):
+ * - On 2xx success: returns the response body as a raw string
+ * - On non-2xx: throws Error("http_fetch METHOD URL -> STATUS: BODY")
  *
- * httpFetch returns a JSON string: {status, headers, body}.
+ * Only imported by index.ts — never by core modules or tests.
  */
 
 import { httpFetch } from "@coasys/ad4m-ldk";
@@ -17,25 +19,31 @@ export class DenoTransport implements Transport {
         headers: Record<string, string>,
         body: string,
     ): Promise<TransportResponse> {
-        const responseRaw = await httpFetch(
-            url,
-            method,
-            JSON.stringify(headers),
-            body,
-        );
+        try {
+            const responseText = await httpFetch(
+                url,
+                method,
+                JSON.stringify(headers),
+                body,
+            );
 
-        const parsed = JSON.parse(responseRaw);
-        const status: number = typeof parsed.status === "number" ? parsed.status : 0;
-
-        let responseHeaders: Record<string, string> = {};
-        if (parsed.headers && typeof parsed.headers === "object") {
-            responseHeaders = parsed.headers;
+            return {
+                status: 200,
+                headers: {},
+                body: responseText || "",
+            };
+        } catch (err: unknown) {
+            const errMsg = err instanceof Error ? err.message : String(err);
+            const match = errMsg.match(/http_fetch\s+\S+\s+\S+\s+->\s+(\d+):\s*(.*)?$/s);
+            if (match) {
+                return {
+                    status: parseInt(match[1], 10),
+                    headers: {},
+                    body: match[2] || "",
+                };
+            }
+            console.error(`[transport] httpFetch error: ${errMsg}`);
+            return { status: 0, headers: {}, body: errMsg };
         }
-
-        const responseBody: string = typeof parsed.body === "string"
-            ? parsed.body
-            : JSON.stringify(parsed.body ?? "");
-
-        return { status, headers: responseHeaders, body: responseBody };
     }
 }
