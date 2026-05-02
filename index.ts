@@ -40,6 +40,16 @@ import { sync as doSync, handleInboundSignal, clearBuffer, setGatewaySync, setLa
 import { initWritersFromSettings } from "./src/membership.js";
 import { serializeCommitBlock } from "./src/commit-block.pure.js";
 import { buildCommitBlock } from "./src/commit-block.js";
+import {
+    initTelepresence,
+    resetTelepresence,
+    setOnlineStatus as telepresenceSetOnlineStatus,
+    getOnlineAgents as telepresenceGetOnlineAgents,
+    sendSignal as telepresenceSendSignal,
+    sendBroadcast as telepresenceSendBroadcast,
+    registerSignalCallback as telepresenceRegisterSignalCallback,
+    pollInbox,
+} from "./src/telepresence.js";
 
 // Adapter imports
 import { initTransport, initGateway, getGateway } from "./src/transport.js";
@@ -182,6 +192,9 @@ const language = defineLanguage({
             // Set up gateway-based sync
             setGatewaySync(feedKey, currentSeq);
 
+            // Initialize telepresence with gateway URL
+            initTelepresence(gatewayUrl, myDid, feedKey);
+
             console.log(`[hypercore-link-language] init complete: did=${myDid}, feed=${feedKey.substring(0, 16)}..., seq=${currentSeq}`);
             return;
         }
@@ -241,6 +254,7 @@ const language = defineLanguage({
             // Legacy: leave Hyperswarm
             emitLeaveSwarm(discoveryKey);
         }
+        resetTelepresence();
         myDid = "";
         currentSeq = 0;
         gatewayMode = false;
@@ -382,7 +396,19 @@ const language = defineLanguage({
             if (!configured || settings.syncMode === "publish-only") {
                 return { additions: [], removals: [] };
             }
-            return doSync();
+            const diff = await doSync();
+
+            // Poll telepresence inbox for incoming signals during sync cycle
+            if (gatewayMode) {
+                try {
+                    await pollInbox();
+                } catch (err) {
+                    // Non-fatal: inbox polling failure should not break sync
+                    console.warn(`[hypercore-link-language] inbox poll error:`, err);
+                }
+            }
+
+            return diff;
         },
 
         async render() {
@@ -426,6 +452,31 @@ const language = defineLanguage({
             return store.listPeers("peers/");
         },
     },
+
+    // -----------------------------------------------------------------------
+    // telepresence
+    // -----------------------------------------------------------------------
+    telepresence: {
+        async setOnlineStatus(status: unknown): Promise<void> {
+            return telepresenceSetOnlineStatus(status);
+        },
+
+        async getOnlineAgents(): Promise<unknown[]> {
+            return telepresenceGetOnlineAgents();
+        },
+
+        async sendSignal(remoteDid: string, payload: unknown): Promise<object> {
+            return telepresenceSendSignal(remoteDid, payload);
+        },
+
+        async sendBroadcast(payload: unknown): Promise<object> {
+            return telepresenceSendBroadcast(payload);
+        },
+
+        async registerSignalCallback(callback: any): Promise<void> {
+            return telepresenceRegisterSignalCallback(callback);
+        },
+    },
 });
 
 // ---------------------------------------------------------------------------
@@ -447,6 +498,11 @@ export const {
     perspectiveQueryRun,
     peersSetLocal,
     peersRemote,
+    telepresenceSetOnlineStatus,
+    telepresenceGetOnlineAgents,
+    telepresenceSendSignal,
+    telepresenceSendBroadcast,
+    telepresenceRegisterSignalCallback,
 } = language;
 
 export default language;
