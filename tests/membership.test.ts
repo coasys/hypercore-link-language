@@ -13,7 +13,7 @@ import {
     filterValidWriterKeys,
     WRITER_KEYS_PREFIX,
     FEED_KEY_HEX_LENGTH,
-} from "../src/membership.pure.js";
+} from "../src/membership.js";
 
 // ---------------------------------------------------------------------------
 // Constants

@@ -9,9 +9,9 @@ import {
     shouldFederate,
     linkOriginKey,
     isPredicateExcluded,
-    linkContentKey,
+    dualLinkContentKey as linkContentKey,
     linkContentHash,
-} from "../src/dual-language.js";
+} from "../src/translate.js";
 
 import type { LinkExpression } from "../src/types.js";
 

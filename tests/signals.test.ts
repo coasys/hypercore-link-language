@@ -12,7 +12,7 @@ import {
     buildLeaveSwarmSignal,
     parseInboundSignal,
     generateRequestId,
-} from "../src/signals.pure.js";
+} from "../src/signals.js";
 
 import type {
     AppendSignal,
@@ -22,7 +22,7 @@ import type {
     BlockSignal,
     QueryResultSignal,
     PeerSignal,
-} from "../src/signals.pure.js";
+} from "../src/signals.js";
 
 // ---------------------------------------------------------------------------
 // Outbound signal constructors

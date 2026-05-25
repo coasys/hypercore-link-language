@@ -5,19 +5,19 @@
 import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 
-import type { StorageAdapter } from "../src/storage-interface.js";
-import { initStorage } from "../src/storage-interface.js";
-import type { RuntimeAdapter } from "../src/runtime-interface.js";
-import { initRuntime } from "../src/runtime-interface.js";
+import type { StorageAdapter } from "../src/adapters.js";
+import { initStorage } from "../src/adapters.js";
+import type { RuntimeAdapter } from "../src/adapters.js";
+import { initRuntime } from "../src/adapters.js";
 
 import * as store from "../src/store.js";
 import { sync, syncFromBuffer, bufferBlock, clearBuffer, getBufferSize, handleInboundSignal } from "../src/sync.js";
 import { initTransport } from "../src/transport.js";
 import type { Transport, TransportResponse } from "../src/transport.js";
-import { serializeCommitBlock } from "../src/commit-block.pure.js";
-import type { HypercoreCommitBlock } from "../src/commit-block.pure.js";
+import { serializeCommitBlock } from "../src/commit-block.js";
+import type { HypercoreCommitBlock } from "../src/commit-block.js";
 import type { LinkExpression } from "../src/types.js";
-import type { BlockSignal } from "../src/signals.pure.js";
+import type { BlockSignal } from "../src/signals.js";
 
 // ---------------------------------------------------------------------------
 // Mock adapters

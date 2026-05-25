@@ -10,7 +10,7 @@
  * Spec §11: Encryption.
  */
 
-import { getStorage } from "./storage-interface.js";
+import { getStorage } from "./adapters.js";
 
 // ---------------------------------------------------------------------------
 // Constants

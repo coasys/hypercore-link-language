@@ -32,13 +32,12 @@ import type { PerspectiveDiff, LinkExpression } from "./src/types.js";
 import { parseSettings } from "./src/settings.js";
 import type { HypercoreSettings } from "./src/settings.js";
 import { commitDiff } from "./src/translate.js";
-import { linkContentKey } from "./src/translate.pure.js";
-import { shouldFederate, linkOriginKey, isPredicateExcluded } from "./src/dual-language.js";
+import { linkContentKey, shouldFederate, linkOriginKey, isPredicateExcluded } from "./src/translate.js";
 import * as store from "./src/store.js";
 import { emitAppend, emitJoinSwarm, emitLeaveSwarm } from "./src/signals.js";
 import { sync as doSync, handleInboundSignal, clearBuffer, setGatewaySync, setLastSyncedSeq } from "./src/sync.js";
 import { initWritersFromSettings } from "./src/membership.js";
-import { serializeCommitBlock } from "./src/commit-block.pure.js";
+import { serializeCommitBlock } from "./src/commit-block.js";
 import { buildCommitBlock } from "./src/commit-block.js";
 import {
     initTelepresence,
@@ -53,13 +52,8 @@ import {
 
 // Adapter imports
 import { initTransport, initGateway, getGateway } from "./src/transport.js";
-import { DenoTransport } from "./src/transport-deno.js";
-import { initStorage, getStorage } from "./src/storage-interface.js";
-import { DenoStorageAdapter } from "./src/storage-deno.js";
-import { initSigning } from "./src/signing-interface.js";
-import { DenoSigningAdapter } from "./src/signing-deno.js";
-import { initRuntime } from "./src/runtime-interface.js";
-import { DenoRuntime } from "./src/runtime-deno.js";
+import { initStorage, getStorage, initSigning, initRuntime } from "./src/adapters.js";
+import { DenoTransport, DenoStorageAdapter, DenoSigningAdapter, DenoRuntime } from "./src/adapters-deno.js";
 
 // ---------------------------------------------------------------------------
 // Template Variables (per Spec §8)

@@ -5,7 +5,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-import { detectPattern, isSocialPattern } from "../src/sdna.js";
+import { detectPattern, isSocialPattern } from "../src/translate.js";
 import type { LinkExpression } from "../src/types.js";
 
 // ---------------------------------------------------------------------------

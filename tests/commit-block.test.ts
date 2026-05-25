@@ -11,8 +11,8 @@ import {
     computeBlockHash,
     blockToDiff,
     isValidCommitBlock,
-} from "../src/commit-block.pure.js";
-import type { HypercoreCommitBlock } from "../src/commit-block.pure.js";
+} from "../src/commit-block.js";
+import type { HypercoreCommitBlock } from "../src/commit-block.js";
 import type { LinkExpression } from "../src/types.js";
 
 // ---------------------------------------------------------------------------

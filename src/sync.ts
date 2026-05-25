@@ -9,11 +9,11 @@
  */
 
 import type { PerspectiveDiff, LinkExpression } from "./types.js";
-import type { HypercoreCommitBlock } from "./commit-block.pure.js";
-import { deserializeCommitBlock } from "./commit-block.pure.js";
-import { blockToPerspectiveDiff } from "./translate.pure.js";
+import type { HypercoreCommitBlock } from "./commit-block.js";
+import { deserializeCommitBlock } from "./commit-block.js";
+import { blockToPerspectiveDiff } from "./translate.js";
 import * as store from "./store.js";
-import type { BlockSignal, PeerSignal } from "./signals.pure.js";
+import type { BlockSignal, PeerSignal } from "./signals.js";
 import { getGateway } from "./transport.js";
 import type { Entry } from "./transport.js";
 

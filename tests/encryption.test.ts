@@ -5,8 +5,8 @@
 import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 
-import type { StorageAdapter } from "../src/storage-interface.js";
-import { initStorage } from "../src/storage-interface.js";
+import type { StorageAdapter } from "../src/adapters.js";
+import { initStorage } from "../src/adapters.js";
 
 import {
     setEncryptionKey,

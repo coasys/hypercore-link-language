@@ -8,10 +8,10 @@
 import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 
-import type { StorageAdapter } from "../src/storage-interface.js";
-import { initStorage } from "../src/storage-interface.js";
-import type { RuntimeAdapter } from "../src/runtime-interface.js";
-import { initRuntime } from "../src/runtime-interface.js";
+import type { StorageAdapter } from "../src/adapters.js";
+import { initStorage } from "../src/adapters.js";
+import type { RuntimeAdapter } from "../src/adapters.js";
+import { initRuntime } from "../src/adapters.js";
 import { initTransport } from "../src/transport.js";
 import type { Transport, TransportResponse } from "../src/transport.js";
 import * as store from "../src/store.js";
@@ -26,8 +26,8 @@ import {
     peersToAgentList,
     parseInboxMessages,
     TELEPRESENCE_PATHS,
-} from "../src/telepresence.pure.js";
-import type { PeerInfo, InboxMessage } from "../src/telepresence.pure.js";
+} from "../src/telepresence.js";
+import type { PeerInfo, InboxMessage } from "../src/telepresence.js";
 
 // Impure module
 import {

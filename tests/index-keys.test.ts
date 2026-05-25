@@ -22,9 +22,9 @@ import {
     META_NEIGHBOURHOOD_KEY,
     allIndexKeys,
     allIndexKeysForDeletion,
-} from "../src/index-keys.pure.js";
+} from "../src/index-keys.js";
 
-import type { IndexField } from "../src/index-keys.pure.js";
+import type { IndexField } from "../src/index-keys.js";
 
 // ---------------------------------------------------------------------------
 // Key generation

@@ -12,7 +12,7 @@ import {
     isValidLink,
     verifyRoundTrip,
     diffToBlockPayload,
-} from "../src/translate.pure.js";
+} from "../src/translate.js";
 
 import {
     commitDiff,
@@ -24,8 +24,8 @@ import {
 import {
     serializeCommitBlock,
     deserializeCommitBlock,
-} from "../src/commit-block.pure.js";
-import type { HypercoreCommitBlock } from "../src/commit-block.pure.js";
+} from "../src/commit-block.js";
+import type { HypercoreCommitBlock } from "../src/commit-block.js";
 
 import type { LinkExpression, PerspectiveDiff } from "../src/types.js";
 
