@@ -19,6 +19,7 @@ import { blockToPerspectiveDiff } from "./translate.js";
 import * as store from "./store.js";
 import type { BlockSignal, PeerSignal } from "./signals.js";
 import { getGateway } from "./transport.js";
+import { getRuntime } from "./adapters.js";
 
 // ---------------------------------------------------------------------------
 // Block buffer (signal-based mode)
@@ -82,6 +83,25 @@ export function setLastSyncedSeq(seq: number): void {
     _lastSyncedSeq = seq;
 }
 
+/**
+ * Record the result of a LOCAL commit. Caches the real content-hash revision,
+ * but DELIBERATELY does NOT advance the fold cursor.
+ *
+ * Why not advance: the gateway linearizes every writer into ONE op-log with a
+ * single global seq. A commit only appends OUR ops, yet peer ops may already be
+ * interleaved BELOW `result.seq` and are not yet folded into our cache.
+ * Advancing the cursor to `result.seq` here would make the next
+ * `diff?since=seq` skip those peer ops permanently — both agents then freeze at
+ * their own links (the observed C1 divergence, A=10/B=10). sync() owns the
+ * cursor and advances it only after actually folding. Our own just-committed
+ * links are already applied locally and emitted by the commit path, and sync()
+ * dedups the echo, so read-your-writes still holds without touching the cursor.
+ */
+export function noteLocalCommit(result: { revision: string; seq: number }): void {
+    if (result.revision) store.setRevision(result.revision);
+    // Intentionally no _lastSyncedSeq mutation. See the doc-comment above.
+}
+
 // ---------------------------------------------------------------------------
 // Shared: process entries into a diff
 // ---------------------------------------------------------------------------
@@ -141,23 +161,46 @@ export async function sync(): Promise<PerspectiveDiff> {
             // Cache the real content-hash revision the gateway reports.
             if (result.revision) store.setRevision(result.revision);
 
-            const additions = (result.additions || []) as LinkExpression[];
-            const removals = (result.removals || []) as LinkExpression[];
+            const rawAdditions = (result.additions || []) as LinkExpression[];
+            const rawRemovals = (result.removals || []) as LinkExpression[];
 
-            // Advance the cursor even on empty diffs (seq is monotonic).
+            // Advance the cursor even on empty diffs (seq is monotonic). Sound
+            // here because we fold every op up to result.seq below before the
+            // next sync reads from the advanced cursor.
             if (typeof result.seq === "number" && result.seq > _lastSyncedSeq) {
                 _lastSyncedSeq = result.seq;
             }
 
-            if (additions.length === 0 && removals.length === 0) {
-                return { additions: [], removals: [] };
+            // Fold into the derived cache (Role B mirror of the linearized log),
+            // keeping only the GENUINELY-NEW delta. Because commit() does not
+            // advance the cursor past interleaved peer ops, a sync re-reads our
+            // own just-committed links; those already sit in the cache and fold
+            // to nothing, so we never re-emit our own links. Peer links are new
+            // and surface exactly once.
+            const additions: LinkExpression[] = [];
+            for (const link of rawAdditions) {
+                const isNew = store.getLink(store.hashLink(link)) === null;
+                store.putLink(link);
+                if (isNew) additions.push(link);
+            }
+            const removals: LinkExpression[] = [];
+            for (const link of rawRemovals) {
+                const wasPresent = store.getLink(store.hashLink(link)) !== null;
+                store.removeLink(link);
+                if (wasPresent) removals.push(link);
             }
 
-            // Fold into the derived cache (Role B mirror of the linearized log).
-            for (const addition of additions) store.putLink(addition);
-            for (const removal of removals) store.removeLink(removal);
+            const delta: PerspectiveDiff = { additions, removals };
 
-            return { additions, removals };
+            // The executor DISCARDS sync()'s return value: inbound folds become
+            // queryable in the perspective ONLY via the emitPerspectiveDiff host
+            // channel. Surface the delta through the runtime adapter so peer
+            // links actually reach the executor's perspective.
+            if (additions.length > 0 || removals.length > 0) {
+                getRuntime().emitPerspectiveDiff(delta);
+            }
+
+            return delta;
         } catch (err) {
             console.error(`[hypercore-link-language] gateway sync error:`, err);
             // Fall through to signal-based sync as fallback

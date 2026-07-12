@@ -80,9 +80,12 @@ Language modules (run under `tsx`):
 node --import tsx --test tests/*.test.ts
 ```
 
-286 language tests across 89 suites, including `tests/gateway-convergence.test.ts`,
+288 language tests across 89 suites, including `tests/gateway-convergence.test.ts`,
 which drives the language's GatewayClient + OR-Set hash + sync fold against a
-live gateway server.
+live gateway server — and two C1 regressions: a local commit must not advance
+the fold cursor past interleaved peer ops, and `sync()` must emit inbound folds
+through the runtime's `emitPerspectiveDiff` channel (the executor discards the
+return value).
 
 Gateway (native Autobase, run with plain Node):
 
@@ -90,11 +93,20 @@ Gateway (native Autobase, run with plain Node):
 cd gateway && npm test
 ```
 
-8 gateway tests, including two-writer in-process Autobase convergence
+9 gateway tests, including two-writer in-process Autobase convergence
 (`gateway/tests/convergence.test.js`): real content-hash revision, revision
 byte-identical across many reads of unchanged state (no view-core drift), order-
 independent identical revision hash, removal convergence, DAG-fold ≡ link set,
-and multi-writer authorisation.
+multi-writer authorisation, and the two-agent neighbourhood-handle rendezvous
+(one shared writable base per handle).
+
+### Live convergence (verified)
+
+The AD4M wind-tunnel C1 scenario runs **two real executors** against one shared
+gateway, each writing 10 interleaved links: both agents' perspectives converge
+to all **20 distinct links** (add-convergence ~1.0 s) and an observed removal
+converges across both (~3.1 s). This is the end-to-end proof of `perspective-sync`
+over the real Autobase — beyond the in-process suites above.
 
 ## Layout
 

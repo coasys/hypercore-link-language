@@ -29,9 +29,9 @@ import type { Transport, TransportResponse } from "../src/transport.js";
 import { initTransport, initGateway, getGateway } from "../src/transport.js";
 import type { HashedLink } from "../src/transport.js";
 import { orSetLinkHash } from "../src/link-hash.js";
-import { sync as doSync, setGatewaySync, setLastSyncedSeq } from "../src/sync.js";
+import { sync as doSync, setGatewaySync, setLastSyncedSeq, getLastSyncedSeq, noteLocalCommit } from "../src/sync.js";
 import * as store from "../src/store.js";
-import type { LinkExpression } from "../src/types.js";
+import type { LinkExpression, PerspectiveDiff } from "../src/types.js";
 
 // Import the real gateway (JS ESM) — same server the language talks to in prod.
 import { GatewayState } from "../gateway/src/state.js";
@@ -222,5 +222,75 @@ describe("language ⇄ gateway convergence (real Autobase)", () => {
         const links = (await gateway.links(base.key)).links as LinkExpression[];
         assert.equal(links.length, 1);
         assert.equal(links[0].data.source, "reopen://1");
+    });
+
+    // -----------------------------------------------------------------------
+    // C1 regression: the two bugs behind the observed A=10/B=10 non-convergence.
+    // -----------------------------------------------------------------------
+
+    it("a local commit does not advance the fold cursor past unfolded peer ops", async () => {
+        const gateway = getGateway()!;
+        const base = await gateway.openBase();
+        setGatewaySync(base.key, -1);
+        setLastSyncedSeq(-1);
+
+        // Peer ops land first in the shared op-log and are NOT yet folded by us.
+        const p1 = link("peer://1", "t://1");
+        const p2 = link("peer://2", "t://2");
+        const p3 = link("peer://3", "t://3");
+        await gateway.commit(
+            base.key,
+            [hashed(p1, runtime), hashed(p2, runtime), hashed(p3, runtime)],
+            [],
+        );
+
+        // We commit our own ops. In the shared op-log our seq is the GLOBAL max,
+        // sitting ABOVE the still-unfolded peer ops. noteLocalCommit must NOT
+        // advance the cursor — else the next diff?since=seq skips those peer ops
+        // permanently (the C1 A=10/B=10 freeze).
+        const o1 = link("own://1", "t://1");
+        const o2 = link("own://2", "t://2");
+        const commit = await gateway.commit(base.key, [hashed(o1, runtime), hashed(o2, runtime)], []);
+        noteLocalCommit(commit);
+        assert.equal(getLastSyncedSeq(), -1, "a local commit must not advance the fold cursor");
+        assert.equal(store.getRevision(), commit.revision, "noteLocalCommit caches the real revision");
+
+        // A sync now folds EVERYTHING unseen — peer ops included, no skip.
+        const diff = await doSync();
+        const sources = diff.additions.map((l) => l.data.source).sort();
+        assert.deepEqual(
+            sources,
+            ["own://1", "own://2", "peer://1", "peer://2", "peer://3"],
+            "sync folds all interleaved peer ops plus our own — no cursor-skip",
+        );
+    });
+
+    it("sync() emits the inbound fold via the runtime perspective-diff channel", async () => {
+        const gateway = getGateway()!;
+        const base = await gateway.openBase();
+        setGatewaySync(base.key, -1);
+        setLastSyncedSeq(-1);
+
+        // The executor DISCARDS sync()'s return value; inbound folds reach the
+        // perspective ONLY via emitPerspectiveDiff. Spy on that channel.
+        const emitted: PerspectiveDiff[] = [];
+        class SpyRuntime extends MockRuntime {
+            emitPerspectiveDiff(diff: unknown): void { emitted.push(diff as PerspectiveDiff); }
+        }
+        initRuntime(new SpyRuntime());
+
+        const l1 = link("emit://1", "t://1");
+        const l2 = link("emit://2", "t://2");
+        await gateway.commit(base.key, [hashed(l1, runtime), hashed(l2, runtime)], []);
+
+        const diff = await doSync();
+        assert.equal(diff.additions.length, 2);
+        assert.equal(emitted.length, 1, "a non-empty fold emits exactly one perspective diff");
+        const emittedSources = emitted[0].additions.map((l) => l.data.source).sort();
+        assert.deepEqual(
+            emittedSources,
+            ["emit://1", "emit://2"],
+            "the emitted delta carries the folded peer links",
+        );
     });
 });

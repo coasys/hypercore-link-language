@@ -9,6 +9,7 @@
 
 import path from 'path'
 import fs from 'fs'
+import { createHash } from 'crypto'
 import { AutobaseNode } from './autobase-node.js'
 
 export class GatewayState {
@@ -19,6 +20,8 @@ export class GatewayState {
     this.storageRoot = storageRoot
     /** @type {Map<string, AutobaseNode>} key(hex) → node */
     this.bases = new Map()
+    /** @type {Map<string, string>} neighbourhood handle → real base key */
+    this.handles = new Map()
     /** @type {Map<string, Promise<AutobaseNode>>} de-dupe concurrent opens */
     this.opening = new Map()
     fs.mkdirSync(storageRoot, { recursive: true })
@@ -61,6 +64,54 @@ export class GatewayState {
     })()
 
     this.opening.set(keyHex, promise)
+    return promise
+  }
+
+  /**
+   * Resolve a neighbourhood HANDLE to a single shared, writable Autobase,
+   * creating it once on first request and returning the same node thereafter.
+   *
+   * Why this exists: a neighbourhood is identified across agents by a
+   * deterministic handle (e.g. the AD4M neighbourhood id), but an Autobase's
+   * identity is a GENERATED bootstrap-writer core key — it cannot be chosen in
+   * advance. Opening a base with an arbitrary handle as the bootstrap key yields
+   * a permanently NON-writable base: no real bootstrap-writer core exists to
+   * authorise the local writer, so `base.writable` stays false and commits 409.
+   * So for co-located agents sharing ONE gateway process, we rendezvous them on
+   * a single freshly-created writable base (bootstrap=null → the node is its own
+   * bootstrap writer, immediately writable) and alias the handle to its real
+   * key. Genuine cross-gateway multi-writer — each agent its own gateway,
+   * replicating over Hyperswarm with an addWriter handshake — is a separate,
+   * heavier path (see README/AGENTS); it is exercised by the in-process
+   * twoWriters convergence tests, not this HTTP rendezvous.
+   *
+   * @param {string} handle  neighbourhood handle (any stable string)
+   * @returns {Promise<AutobaseNode>}
+   */
+  async openNeighbourhood (handle) {
+    const known = this.handles.get(handle)
+    if (known) {
+      const node = this.bases.get(known)
+      if (node) return node
+    }
+
+    const inFlightKey = 'nh:' + handle
+    const inFlight = this.opening.get(inFlightKey)
+    if (inFlight) return inFlight
+
+    const promise = (async () => {
+      const dirName = 'nh-' + createHash('sha256').update(handle).digest('hex').slice(0, 32)
+      const dir = path.join(this.storageRoot, dirName)
+      const node = new AutobaseNode(dir, null)
+      await node.ready()
+      const realKey = node.key()
+      this.bases.set(realKey, node)
+      this.handles.set(handle, realKey)
+      this.opening.delete(inFlightKey)
+      return node
+    })()
+
+    this.opening.set(inFlightKey, promise)
     return promise
   }
 

@@ -6,7 +6,7 @@
  * | Method | Path                        | Body / Query              | Response                                  |
  * |--------|-----------------------------|---------------------------|-------------------------------------------|
  * | GET    | /health                     | —                         | { status, bases }                         |
- * | POST   | /bases                      | { key? }                  | { key, discoveryKey, localWriterKey, writable } |
+ * | POST   | /bases                      | { neighbourhood? | key? } | { key, discoveryKey, localWriterKey, writable } |
  * | GET    | /bases/:key                 | —                         | { key, discoveryKey, localWriterKey, writable, replicating, peers } |
  * | GET    | /bases/:key/revision        | —                         | { revision, heads }                       |
  * | GET    | /bases/:key/links           | —                         | { links: LinkExpression[] }               |
@@ -96,7 +96,11 @@ export function createBase (state) {
   return async (req, res, _params, body) => {
     try {
       let node
-      if (body && typeof body.key === 'string' && body.key.length > 0) {
+      if (body && typeof body.neighbourhood === 'string' && body.neighbourhood.length > 0) {
+        // Co-located rendezvous: resolve a neighbourhood handle to one shared
+        // writable base (create-once). See state.openNeighbourhood.
+        node = await state.openNeighbourhood(body.neighbourhood)
+      } else if (body && typeof body.key === 'string' && body.key.length > 0) {
         node = await state.openBase(body.key)
       } else {
         node = await state.createBase()

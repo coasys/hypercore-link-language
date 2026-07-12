@@ -81,6 +81,13 @@ hash, removal convergence, DAG-fold ≡ link set, multi-writer authorisation).
 **Not** in CI: Hyperswarm DHT peer discovery + replication across separate
 machines (needs a real UDP DHT and two gateway processes).
 
+**Live 2-executor convergence — verified.** The AD4M wind-tunnel C1 scenario
+runs two real executors (ports 12100/12101) against one shared gateway,
+each writing 10 interleaved links: both agents' perspectives converge to all
+20 distinct links (add-convergence ~1.0 s), and an observed removal converges
+across both (~3.1 s). This is the end-to-end proof that the language honours
+`perspective-sync` over the real Autobase — not just the in-process suites.
+
 ## Gotchas
 
 - **Never** use `base.hash()` for the revision — it is a view-core merkle that
@@ -88,3 +95,26 @@ machines (needs a real UDP DHT and two gateway processes).
   the resolved OR-Set state digest.
 - The gateway is a **separate Node package** with its own `package.json`,
   `node_modules`, and test runner — build/test it independently of the language.
+- **Neighbourhood-handle rendezvous, NOT bootstrap-key open (phantom-bootstrap
+  trap).** An Autobase key is a *generated* bootstrap-writer core key, not a
+  namespace you can choose. Opening `hex32(neighbourhoodId)` as a bootstrap key
+  yields `writable:false` and every commit 409s. Co-located agents instead
+  resolve the neighbourhood *handle* to ONE freshly-created writable base via
+  `POST /bases {neighbourhood: <handle>}` (`openNeighbourhood`), create-once per
+  handle — so `index.ts` init calls `openNeighbourhood(HYPERCORE_KEY)`, treating
+  the templated key as a handle, never `openBase(HYPERCORE_KEY)`.
+- **A local commit must NOT advance the fold cursor.** The gateway linearizes
+  every writer into one op-log with a single global seq. A commit appends only
+  *our* ops, but peer ops may already be interleaved below `result.seq` and not
+  yet folded. Advancing the cursor to `result.seq` makes the next
+  `diff?since=seq` skip those peer ops permanently — both agents freeze at their
+  own links (the observed C1 A=10/B=10 non-convergence). `sync()` owns the
+  cursor; `noteLocalCommit()` caches the revision but never advances it.
+  Read-your-writes still holds: the commit path applies + emits our own links
+  locally, and `sync()` dedups the echo by OR-Set membership.
+- **`sync()` must emit inbound folds via `emitPerspectiveDiff`.** The executor
+  DISCARDS `sync()`'s return value; a fold reaches the queryable perspective
+  ONLY through the `emitPerspectiveDiff` host channel. Folding into the derived
+  cache and returning the diff is invisible to `queryLinks` — peer links never
+  surface. `src/sync.ts` routes the inbound delta through the runtime adapter's
+  `emitPerspectiveDiff` (kept `ad4m:host`-free via the adapter indirection).

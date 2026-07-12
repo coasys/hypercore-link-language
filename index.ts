@@ -50,7 +50,7 @@ import { shouldFederate, linkOriginKey, isPredicateExcluded } from "./src/transl
 import * as store from "./src/store.js";
 import { orSetLinkHash } from "./src/link-hash.js";
 import { emitAppend, emitJoinSwarm, emitLeaveSwarm } from "./src/signals.js";
-import { sync as doSync, handleInboundSignal, clearBuffer, setGatewaySync, setLastSyncedSeq } from "./src/sync.js";
+import { sync as doSync, handleInboundSignal, clearBuffer, setGatewaySync, noteLocalCommit } from "./src/sync.js";
 import { initWritersFromSettings, listWriterKeys } from "./src/membership.js";
 import type { HashedLink } from "./src/transport.js";
 import {
@@ -171,15 +171,20 @@ const language = defineLanguage({
             // Widened to string: the template variable is rewritten at publish
             // time, so its literal type is not meaningful here.
             const requestedKey: string = HYPERCORE_KEY || "";
-            const openKey = (requestedKey === "auto" || !isTemplateVarFilled(requestedKey))
-                ? undefined
-                : requestedKey;
+            const useHandle = !(requestedKey === "auto" || !isTemplateVarFilled(requestedKey));
             try {
-                const base = await getGateway()!.openBase(openKey);
+                // The neighbourhood is identified by a deterministic HANDLE (the
+                // templated HYPERCORE_KEY), not a real Autobase bootstrap key (an
+                // Autobase key is a generated core key). Resolve the handle to
+                // the shared writable base via the gateway's neighbourhood
+                // rendezvous; "auto"/unfilled means create a fresh base.
+                const base = useHandle
+                    ? await getGateway()!.openNeighbourhood(requestedKey)
+                    : await getGateway()!.openBase();
                 baseKey = base.key;
                 discoveryKey = base.discoveryKey;
                 console.log(
-                    `[hypercore-link-language] base ${openKey ? "opened" : "created"}: ` +
+                    `[hypercore-link-language] base ${useHandle ? "resolved" : "created"}: ` +
                     `${baseKey.substring(0, 16)}... writable=${base.writable} ` +
                     `localWriter=${base.localWriterKey.substring(0, 16)}...`,
                 );
@@ -373,14 +378,14 @@ const language = defineLanguage({
 
                 try {
                     const result = await gateway.commit(baseKey, additions, removals);
-                    // Read-your-writes: advance the fold cursor past our own ops
-                    // so sync() does not re-emit them, and cache the REAL
-                    // content-hash revision the gateway returned.
-                    if (result.seq >= 0) {
-                        sinceSeq = result.seq;
-                        setLastSyncedSeq(sinceSeq);
-                    }
-                    store.setRevision(result.revision);
+                    // Cache the real content-hash revision but DELIBERATELY do
+                    // not advance the fold cursor. The gateway linearizes every
+                    // writer into one op-log with a single global seq; peer ops
+                    // may already be interleaved below result.seq and are not yet
+                    // folded. Advancing here would make the next diff?since=seq
+                    // skip them permanently (the observed C1 A=10/B=10 freeze).
+                    // sync() owns the cursor. See noteLocalCommit's doc-comment.
+                    noteLocalCommit(result);
                     console.log(
                         `[hypercore-link-language] committed ${additions.length} add / ` +
                         `${removals.length} remove → revision=${result.revision.substring(0, 12)}... seq=${result.seq}`,

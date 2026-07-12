@@ -121,6 +121,19 @@ export class GatewayClient {
         return this.request('POST', '/bases', body) as Promise<BaseInfo>;
     }
 
+    /**
+     * POST /bases with a neighbourhood HANDLE — resolve co-located agents to one
+     * shared, writable Autobase (create-once per handle). Use this when the
+     * neighbourhood is identified by a deterministic handle (the AD4M
+     * neighbourhood id) rather than a real Autobase bootstrap key: an Autobase
+     * key is a generated core key that cannot be chosen in advance, so opening a
+     * handle as a bootstrap key yields a non-writable base. Returns the real base
+     * key both agents then use for every subsequent op.
+     */
+    async openNeighbourhood(handle: string): Promise<BaseInfo> {
+        return this.request('POST', '/bases', { neighbourhood: handle }) as Promise<BaseInfo>;
+    }
+
     /** GET /bases/:key — current base info. */
     async getBase(key: string): Promise<BaseInfo> {
         return this.request('GET', `/bases/${key}`) as Promise<BaseInfo>;

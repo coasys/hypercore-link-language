@@ -99,3 +99,48 @@ test('HTTP: full commit / revision / links / diff / remove round-trip', async (t
   const reopened = await req(base, 'POST', '/bases', { key })
   assert.equal(reopened.body.key, key)
 })
+
+test('HTTP: two agents on one neighbourhood handle share a single writable base', async (t) => {
+  const { base, stop } = await start()
+  t.after(stop)
+
+  const handle = 'ad4m-neighbourhood-shared-xyz'
+
+  // Agent A resolves the handle → a fresh, WRITABLE base. (A phantom-bootstrap
+  // join of the handle-as-key would be writable:false and every commit 409s —
+  // this asserts the neighbourhood rendezvous instead.)
+  const a = await req(base, 'POST', '/bases', { neighbourhood: handle })
+  assert.equal(a.status, 200)
+  assert.match(a.body.key, /^[0-9a-f]{64}$/)
+  assert.equal(a.body.writable, true, 'handle resolves to a writable base, not a phantom-bootstrap join')
+
+  // Agent B resolves the SAME handle → the SAME base identity, also writable.
+  const b = await req(base, 'POST', '/bases', { neighbourhood: handle })
+  assert.equal(b.body.key, a.body.key, 'same handle → same shared base key')
+  assert.equal(b.body.writable, true)
+
+  const key = a.body.key
+
+  // Both agents commit through the shared node; both links converge in the fold.
+  const la = link('shared://A', 'shared://tA')
+  const commitA = await req(base, 'POST', `/bases/${key}/commit`, { additions: [la], removals: [] })
+  assert.equal(commitA.status, 200)
+  assert.match(commitA.body.revision, /^[0-9a-f]{64}$/)
+
+  const lb = link('shared://B', 'shared://tB')
+  const commitB = await req(base, 'POST', `/bases/${key}/commit`, { additions: [lb], removals: [] })
+  assert.equal(commitB.status, 200)
+
+  const links = await req(base, 'GET', `/bases/${key}/links`)
+  assert.equal(links.body.links.length, 2, "both agents' links converge in the shared base")
+
+  // A removal by one agent converges (the shared OR-Set tombstones the exact op).
+  const rm = await req(base, 'POST', `/bases/${key}/commit`, { additions: [], removals: [la] })
+  assert.equal(rm.status, 200)
+  const afterRm = await req(base, 'GET', `/bases/${key}/links`)
+  assert.equal(afterRm.body.links.length, 1, 'removal converges in the shared base')
+
+  // A distinct handle yields a DIFFERENT base.
+  const other = await req(base, 'POST', '/bases', { neighbourhood: 'a-different-neighbourhood' })
+  assert.notEqual(other.body.key, key, 'distinct handles get distinct bases')
+})
