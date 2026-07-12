@@ -1,21 +1,24 @@
 /**
- * Sync coordination — processes new blocks, from either signals or gateway.
+ * Sync coordination — folds new ops into the derived link cache, from either
+ * the Autobase gateway or legacy executor signals.
  *
  * Two modes:
- * 1. Signal-based (legacy): blocks arrive via handleSignal(), buffered, drained on sync()
- * 2. Gateway-based: sync() fetches new entries from the HTTP gateway
+ * 1. Gateway-based (the real convergence path): sync() asks the gateway for the
+ *    incremental diff of ops linearized after our cursor, shaped as a
+ *    PerspectiveDiff, and folds it into the local cache. The Autobase-linearized
+ *    op-log is authoritative; this cache is derived (Role B).
+ * 2. Signal-based (legacy fallback): commit blocks arrive via handleSignal(),
+ *    are buffered, and drained on sync().
  *
  * Uses injected interfaces — no ad4m:host imports.
  */
 
 import type { PerspectiveDiff, LinkExpression } from "./types.js";
-import type { HypercoreCommitBlock } from "./commit-block.js";
 import { deserializeCommitBlock } from "./commit-block.js";
 import { blockToPerspectiveDiff } from "./translate.js";
 import * as store from "./store.js";
 import type { BlockSignal, PeerSignal } from "./signals.js";
 import { getGateway } from "./transport.js";
-import type { Entry } from "./transport.js";
 
 // ---------------------------------------------------------------------------
 // Block buffer (signal-based mode)
@@ -49,26 +52,31 @@ export function clearBuffer(): void {
 // Gateway sync state
 // ---------------------------------------------------------------------------
 
-let _gatewayFeedKey: string = "";
-let _lastSyncedSeq: number = 0;
+let _gatewayBaseKey: string = "";
+/**
+ * Cursor: the highest linearized op seq already folded into the cache. A value
+ * of -1 means "before genesis", so the next diff folds the entire log.
+ */
+let _lastSyncedSeq: number = -1;
 
 /**
- * Configure gateway-based sync with a feed key.
+ * Configure gateway-based sync with the Autobase key. Start the cursor before
+ * genesis (-1) so the first sync folds the whole linearized op-log.
  */
-export function setGatewaySync(feedKey: string, startSeq: number = 0): void {
-    _gatewayFeedKey = feedKey;
+export function setGatewaySync(baseKey: string, startSeq: number = -1): void {
+    _gatewayBaseKey = baseKey;
     _lastSyncedSeq = startSeq;
 }
 
 /**
- * Get the last synced sequence number (for gateway mode).
+ * Get the last synced op seq (for gateway mode).
  */
 export function getLastSyncedSeq(): number {
     return _lastSyncedSeq;
 }
 
 /**
- * Set the last synced sequence (e.g. after a commit).
+ * Set the last synced op seq (e.g. after a read-your-writes commit).
  */
 export function setLastSyncedSeq(seq: number): void {
     _lastSyncedSeq = seq;
@@ -116,31 +124,40 @@ function processEntries(entries: { seq: number; data: string }[]): PerspectiveDi
 // ---------------------------------------------------------------------------
 
 /**
- * Drain the block buffer and/or fetch from gateway, process blocks,
- * store links, return diff.
+ * Fetch the incremental diff of ops linearized after our cursor from the
+ * Autobase gateway, fold it into the derived cache, and return it as a
+ * PerspectiveDiff. Falls back to draining the legacy signal buffer.
  */
 export async function sync(): Promise<PerspectiveDiff> {
     const gateway = getGateway();
 
-    // Gateway mode: fetch new entries from the HTTP sidecar
-    if (gateway && _gatewayFeedKey) {
+    // Gateway mode: the Autobase-linearized op-log is authoritative. Ask for the
+    // diff since our cursor; the gateway returns ops (already merged/folded by
+    // Autobase) shaped as a PerspectiveDiff plus the max linearized op seq.
+    if (gateway && _gatewayBaseKey) {
         try {
-            const result = await gateway.sync(_gatewayFeedKey, _lastSyncedSeq);
+            const result = await gateway.diff(_gatewayBaseKey, _lastSyncedSeq);
 
-            if (result.entries.length === 0) {
+            // Cache the real content-hash revision the gateway reports.
+            if (result.revision) store.setRevision(result.revision);
+
+            const additions = (result.additions || []) as LinkExpression[];
+            const removals = (result.removals || []) as LinkExpression[];
+
+            // Advance the cursor even on empty diffs (seq is monotonic).
+            if (typeof result.seq === "number" && result.seq > _lastSyncedSeq) {
+                _lastSyncedSeq = result.seq;
+            }
+
+            if (additions.length === 0 && removals.length === 0) {
                 return { additions: [], removals: [] };
             }
 
-            const diff = processEntries(result.entries);
+            // Fold into the derived cache (Role B mirror of the linearized log).
+            for (const addition of additions) store.putLink(addition);
+            for (const removal of removals) store.removeLink(removal);
 
-            // Update sync cursor
-            if (result.entries.length > 0) {
-                const maxSeq = Math.max(...result.entries.map(e => e.seq));
-                _lastSyncedSeq = maxSeq + 1;
-                store.setRevision(maxSeq.toString());
-            }
-
-            return diff;
+            return { additions, removals };
         } catch (err) {
             console.error(`[hypercore-link-language] gateway sync error:`, err);
             // Fall through to signal-based sync as fallback

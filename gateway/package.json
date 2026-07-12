@@ -1,0 +1,20 @@
+{
+  "name": "@hexafield/hypercore-gateway",
+  "version": "0.1.0",
+  "description": "Node.js sidecar wrapping Hypercore/Autobase/Hyperswarm for the Hypercore AD4M Link Language",
+  "type": "module",
+  "private": true,
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test tests/*.test.js"
+  },
+  "dependencies": {
+    "autobase": "^7.28.1",
+    "b4a": "^1.6.7",
+    "corestore": "^7.11.0",
+    "hyperbee": "^2.24.0",
+    "hypercore": "^11.33.5",
+    "hyperswarm": "^4.11.7"
+  }
+}

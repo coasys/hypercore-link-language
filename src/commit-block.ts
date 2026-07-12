@@ -9,6 +9,8 @@
  */
 
 import type { LinkExpression, PerspectiveDiff } from "./types.js";
+import { getRuntime } from "./adapters.js";
+import { orSetLinkContent } from "./link-hash.js";
 
 /**
  * Build a commit block from a PerspectiveDiff.
@@ -103,21 +105,37 @@ export function deserializeCommitBlock(data: string): HypercoreCommitBlock | nul
 }
 
 /**
- * Compute a deterministic hash of a commit block for content addressing.
+ * Canonical string form of a commit block, for content addressing.
  *
- * Uses a simple string-based hash since the actual content-address hash
- * is provided by the runtime adapter. This function produces a
- * deterministic input string for hashing.
+ * Includes the FULL content of every link (via the same canonical form the
+ * OR-Set uses), not just counts, so two blocks with different links hash
+ * differently. Fixed field order for determinism.
  */
-export function computeBlockHash(block: HypercoreCommitBlock): string {
-    return JSON.stringify({
-        type: block.type,
-        seq: block.seq,
-        author: block.author,
-        timestamp: block.timestamp,
-        additionCount: block.additions.length,
-        removalCount: block.removals.length,
-    });
+export function canonicalBlockContent(block: HypercoreCommitBlock): string {
+    return JSON.stringify([
+        block.type,
+        block.seq,
+        block.author,
+        block.timestamp,
+        block.additions.map(orSetLinkContent),
+        block.removals.map(orSetLinkContent),
+    ]);
+}
+
+/**
+ * Compute a real content-address hash of a commit block.
+ *
+ * Hashes the full canonical content (including every link) with the runtime's
+ * content-address hash (AD4M's hash: SHA-256 → CIDv1 → base58btc). Deterministic
+ * for identical blocks, distinct for any content difference. An explicit hashFn
+ * may be injected for testing without the runtime.
+ */
+export function computeBlockHash(
+    block: HypercoreCommitBlock,
+    hashFn?: (data: string) => string,
+): string {
+    const fn = hashFn ?? getRuntime().hash;
+    return fn(canonicalBlockContent(block));
 }
 
 /**

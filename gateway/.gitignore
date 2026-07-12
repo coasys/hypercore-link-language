@@ -1,0 +1,10 @@
+# The repo-root .gitignore ignores *.js (the language is authored in .ts and
+# compiled). The gateway is authored in .js — it has no build step, so its .js
+# files ARE the source and must be tracked. Re-include them here.
+!*.js
+!src/*.js
+!tests/*.js
+
+node_modules/
+.gateway-storage/
+*.log

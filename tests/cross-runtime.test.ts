@@ -39,8 +39,7 @@ import {
     buildLeaveSwarmSignal,
     parseInboundSignal,
 } from "../src/signals.js";
-import { isValidWriterKey, filterValidWriterKeys } from "../src/membership.pure.js";
-import { addWriter, listWriters, isKnownWriter } from "../src/membership.js";
+import { addWriter, listWriters, isKnownWriter, isValidWriterKey, filterValidWriterKeys } from "../src/membership.js";
 import {
     setEncryptionKey,
     getEncryptionKey,

@@ -1,23 +1,37 @@
 /**
  * # Hypercore Link Language for AD4M
  *
- * Bridge language that syncs Perspectives via Hypercore append-only logs
- * and Hyperswarm P2P networking.
+ * Bridge language that syncs Perspectives via a Hypercore **Autobase** —
+ * a multi-writer, deterministically-linearized log — over Hyperswarm.
  *
  * Implements perspective-commit, perspective-sync, perspective-query,
  * and peers capabilities.
  *
+ * ## Convergence model (honours AD4M's perspective-sync contract)
+ *
+ * The authoritative substrate (Role A) is an Autobase, owned by a sidecar
+ * Node.js process (the hypercore-gateway) because native Hypercore/Autobase/
+ * Hyperswarm cannot run inside the Language's Deno/WASM sandbox. Each agent
+ * writes its own PerspectiveDiff ops (add/remove, keyed by the link's content
+ * hash) to its own input feed; Autobase linearizes all writers into one DAG.
+ *
+ * - `currentRevision()` returns the Autobase **linearized Merkle head hash** —
+ *   a real content hash, deterministic and identical across converged replicas.
+ *   It is NEVER a sequence number.
+ * - Removals are first-class ops carrying the ORIGINAL link's OR-Set hash, so an
+ *   observed-remove converges against the exact add across replicas.
+ * - The linearized op-log is authoritative; the local KV store is a derived
+ *   read cache (Role B), rebuilt by folding gateway diffs.
+ *
  * Two operating modes:
  *
- * 1. **Gateway mode** (preferred): A sidecar Node.js process (hypercore-gateway)
- *    handles native Hypercore/Hyperswarm operations. This language talks to it
- *    via httpFetch() through the standard AD4M networking API.
- *    Set HYPERCORE_GATEWAY_URL to enable.
+ * 1. **Gateway mode** (the real convergence path): talks to the sidecar over
+ *    httpFetch(). Set HYPERCORE_GATEWAY_URL to enable.
  *
- * 2. **Signal mode** (legacy): Hypercore operations are delegated to the executor
- *    via signal-based communication. Requires executor-side Hypercore support.
+ * 2. **Signal mode** (legacy fallback): diff blocks are relayed via executor
+ *    signals into a local buffer. No native multi-writer linearization.
  *
- * Spec: hypercore-link-language.md
+ * Spec: SPEC_LINK_LANGUAGE_DIFFDAG_CONVERGENCE.md
  */
 
 import {
@@ -32,13 +46,13 @@ import type { PerspectiveDiff, LinkExpression } from "./src/types.js";
 import { parseSettings } from "./src/settings.js";
 import type { HypercoreSettings } from "./src/settings.js";
 import { commitDiff } from "./src/translate.js";
-import { linkContentKey, shouldFederate, linkOriginKey, isPredicateExcluded } from "./src/translate.js";
+import { shouldFederate, linkOriginKey, isPredicateExcluded } from "./src/translate.js";
 import * as store from "./src/store.js";
+import { orSetLinkHash } from "./src/link-hash.js";
 import { emitAppend, emitJoinSwarm, emitLeaveSwarm } from "./src/signals.js";
 import { sync as doSync, handleInboundSignal, clearBuffer, setGatewaySync, setLastSyncedSeq } from "./src/sync.js";
-import { initWritersFromSettings } from "./src/membership.js";
-import { serializeCommitBlock } from "./src/commit-block.js";
-import { buildCommitBlock } from "./src/commit-block.js";
+import { initWritersFromSettings, listWriterKeys } from "./src/membership.js";
+import type { HashedLink } from "./src/transport.js";
 import {
     initTelepresence,
     resetTelepresence,
@@ -80,9 +94,13 @@ const HYPERCORE_GATEWAY_URL = "<to-be-filled>";
 
 let myDid: string = "";
 let settings: HypercoreSettings;
-let feedKey: string = "";
+/** The Autobase key — the neighbourhood's stable identifier (hex). */
+let baseKey: string = "";
 let discoveryKey: string = "";
-let currentSeq: number = 0;
+/** Highest linearized op seq we have folded into the local cache. */
+let sinceSeq: number = -1;
+/** Local append counter for the legacy signal protocol (NOT a revision). */
+let legacySeq: number = 0;
 let configured: boolean = true;
 let gatewayMode: boolean = false;
 
@@ -132,7 +150,7 @@ const language = defineLanguage({
         myDid = agentDid();
         settings = parseSettings(languageSettings());
 
-        // Check for gateway mode first
+        // Check for gateway mode first — the real Autobase convergence path.
         const gatewayUrl = HYPERCORE_GATEWAY_URL;
         if (isTemplateVarFilled(gatewayUrl)) {
             initGateway(gatewayUrl);
@@ -142,33 +160,54 @@ const language = defineLanguage({
             // Verify gateway connectivity
             try {
                 const health = await getGateway()!.health();
-                console.log(`[hypercore-link-language] gateway health: ${health.status}, feeds: ${health.feeds}`);
+                console.log(`[hypercore-link-language] gateway health: ${health.status}, bases: ${health.bases}`);
             } catch (err) {
                 console.error(`[hypercore-link-language] gateway health check failed:`, err);
                 console.warn(`[hypercore-link-language] will retry gateway on first operation`);
             }
 
-            // Handle feed key: "auto" means create a new feed
-            feedKey = HYPERCORE_KEY || "";
-            discoveryKey = DISCOVERY_KEY || "";
+            // Open (or create) the Autobase for this neighbourhood. HYPERCORE_KEY
+            // is the Autobase key; "auto" / unfilled means create a fresh base.
+            // Widened to string: the template variable is rewritten at publish
+            // time, so its literal type is not meaningful here.
+            const requestedKey: string = HYPERCORE_KEY || "";
+            const openKey = (requestedKey === "auto" || !isTemplateVarFilled(requestedKey))
+                ? undefined
+                : requestedKey;
+            try {
+                const base = await getGateway()!.openBase(openKey);
+                baseKey = base.key;
+                discoveryKey = base.discoveryKey;
+                console.log(
+                    `[hypercore-link-language] base ${openKey ? "opened" : "created"}: ` +
+                    `${baseKey.substring(0, 16)}... writable=${base.writable} ` +
+                    `localWriter=${base.localWriterKey.substring(0, 16)}...`,
+                );
+            } catch (err) {
+                console.error(`[hypercore-link-language] failed to open base:`, err);
+                configured = false;
+                return;
+            }
 
-            if (feedKey === "auto" || !isTemplateVarFilled(feedKey)) {
-                try {
-                    const feed = await getGateway()!.createFeed();
-                    feedKey = feed.key;
-                    discoveryKey = feed.discoveryKey;
-                    console.log(`[hypercore-link-language] created new feed: ${feedKey.substring(0, 16)}...`);
-                } catch (err) {
-                    console.error(`[hypercore-link-language] failed to create feed:`, err);
-                    configured = false;
-                    return;
+            // Authorise any peer input feeds we know about (from settings), so
+            // their ops linearize into our base. Best-effort: a peer we cannot
+            // yet authorise simply won't converge until it is added.
+            if (settings.multiWriter.enabled) {
+                for (const writerKey of listWriterKeys()) {
+                    try {
+                        await getGateway()!.addWriter(baseKey, writerKey);
+                        console.log(`[hypercore-link-language] authorised writer ${writerKey.substring(0, 16)}...`);
+                    } catch (err) {
+                        console.warn(`[hypercore-link-language] addWriter ${writerKey.substring(0, 16)}... failed:`, err);
+                    }
                 }
             }
 
-            // Start replication if discovery key is available
-            if (discoveryKey && discoveryKey !== "auto" && settings.syncMode !== "publish-only") {
+            // Join Hyperswarm and replicate unless publish-only.
+            if (settings.syncMode !== "publish-only") {
                 try {
-                    await getGateway()!.startReplication(feedKey);
+                    const bootstrap = [...parseBootstrapNodes(), ...settings.swarm.bootstrap];
+                    await getGateway()!.startReplication(baseKey, bootstrap.length > 0 ? bootstrap : undefined);
                     console.log(`[hypercore-link-language] replication started`);
                 } catch (err) {
                     console.warn(`[hypercore-link-language] replication start failed:`, err);
@@ -177,38 +216,35 @@ const language = defineLanguage({
 
             configured = true;
 
-            // Restore sync cursor from revision
-            const rev = store.getRevision();
-            if (rev) {
-                currentSeq = parseInt(rev, 10) + 1;
-            }
-
-            // Set up gateway-based sync
-            setGatewaySync(feedKey, currentSeq);
+            // The linearized op-log is authoritative; the local KV is a derived
+            // cache. Start the sync cursor before genesis so the first sync()
+            // folds the entire current log into the cache.
+            sinceSeq = -1;
+            setGatewaySync(baseKey, sinceSeq);
 
             // Initialize telepresence with gateway URL
-            initTelepresence(gatewayUrl, myDid, feedKey);
+            initTelepresence(gatewayUrl, myDid, baseKey);
 
-            console.log(`[hypercore-link-language] init complete: did=${myDid}, feed=${feedKey.substring(0, 16)}..., seq=${currentSeq}`);
+            console.log(`[hypercore-link-language] init complete: did=${myDid}, base=${baseKey.substring(0, 16)}...`);
             return;
         }
 
         // Legacy signal-based mode
-        feedKey = HYPERCORE_KEY || "";
+        baseKey = HYPERCORE_KEY || "";
         discoveryKey = DISCOVERY_KEY || "";
 
         // Guard: if critical template vars are unfilled, run in unconfigured mode
-        if (!isTemplateVarFilled(feedKey) || !isTemplateVarFilled(discoveryKey)) {
+        if (!isTemplateVarFilled(baseKey) || !isTemplateVarFilled(discoveryKey)) {
             configured = false;
             console.warn(
                 "[hypercore-link-language] init: template variables not filled — running in unconfigured mode. "
-                + `HYPERCORE_KEY=${JSON.stringify(feedKey)}, DISCOVERY_KEY=${JSON.stringify(discoveryKey)}`
+                + `HYPERCORE_KEY=${JSON.stringify(baseKey)}, DISCOVERY_KEY=${JSON.stringify(discoveryKey)}`
             );
             return;
         }
 
         configured = true;
-        console.log(`[hypercore-link-language] init: signal mode, did=${myDid}, feed=${feedKey.substring(0, 16)}...`);
+        console.log(`[hypercore-link-language] init: signal mode, did=${myDid}, base=${baseKey.substring(0, 16)}...`);
         console.log(`[hypercore-link-language] sync mode: ${settings.syncMode}`);
         console.log(`[hypercore-link-language] multi-writer: ${settings.multiWriter.enabled}`);
 
@@ -216,12 +252,6 @@ const language = defineLanguage({
         if (settings.multiWriter.enabled && settings.multiWriter.writerKeys.length > 0) {
             const count = initWritersFromSettings(settings.multiWriter.writerKeys, myDid);
             console.log(`[hypercore-link-language] initialized ${count} writers from settings`);
-        }
-
-        // Restore current sequence from revision
-        const rev = store.getRevision();
-        if (rev) {
-            currentSeq = parseInt(rev, 10) + 1;
         }
 
         // Join Hyperswarm if not in publish-only mode
@@ -239,10 +269,10 @@ const language = defineLanguage({
     },
 
     async teardown() {
-        if (gatewayMode && configured && feedKey) {
+        if (gatewayMode && configured && baseKey) {
             // Stop replication gracefully
             try {
-                await getGateway()!.stopReplication(feedKey);
+                await getGateway()!.stopReplication(baseKey);
             } catch { /* ignore */ }
         } else if (configured && discoveryKey) {
             // Legacy: leave Hyperswarm
@@ -250,7 +280,7 @@ const language = defineLanguage({
         }
         resetTelepresence();
         myDid = "";
-        currentSeq = 0;
+        sinceSeq = -1;
         gatewayMode = false;
         console.log("[hypercore-link-language] teardown");
     },
@@ -309,7 +339,12 @@ const language = defineLanguage({
                 }
             }
 
-            // 5. Gateway mode: serialize commit block and POST to gateway
+            // 5. Gateway mode: commit the diff as OR-Set add/remove ops to the
+            //    Autobase. Each op is keyed by the link's content hash (AD4M's
+            //    own content-address hash), computed identically by the gateway,
+            //    so all agents share one OR-Set keyspace. A removal carries the
+            //    ORIGINAL link's hash, so an observed-remove converges against
+            //    the exact add across replicas.
             if (gatewayMode) {
                 const gateway = getGateway();
                 if (!gateway) {
@@ -318,19 +353,17 @@ const language = defineLanguage({
                     return "";
                 }
 
-                // Filter additions/removals through shouldCommit
-                let additions = diff.additions;
-                let removals = diff.removals;
-
-                if (settings.dualLanguage.enabled) {
-                    additions = additions.filter(link => {
-                        const h = store.hashLink(link);
-                        return shouldCommit(h, link);
-                    });
-                    removals = removals.filter(link => {
-                        const h = store.hashLink(link);
-                        return shouldCommit(h, link);
-                    });
+                // Filter additions/removals through shouldCommit, wrapping each
+                // surviving link with its OR-Set hash.
+                const additions: HashedLink[] = [];
+                const removals: HashedLink[] = [];
+                for (const link of diff.additions) {
+                    const h = orSetLinkHash(link, hash);
+                    if (shouldCommit(h, link)) additions.push({ link, hash: h });
+                }
+                for (const link of diff.removals) {
+                    const h = orSetLinkHash(link, hash);
+                    if (shouldCommit(h, link)) removals.push({ link, hash: h });
                 }
 
                 if (additions.length === 0 && removals.length === 0) {
@@ -338,41 +371,44 @@ const language = defineLanguage({
                     return "";
                 }
 
-                // Build the commit block
-                const block = buildCommitBlock(
-                    { additions, removals },
-                    currentSeq,
-                    myDid,
-                );
-                const serialized = serializeCommitBlock(block);
-
                 try {
-                    const result = await gateway.append(feedKey, serialized);
-                    currentSeq = result.seq + 1;
-                    store.setRevision(result.seq.toString());
-                    store.setBlockProcessed(result.seq);
-                    setLastSyncedSeq(currentSeq);
-                    console.log(`[hypercore-link-language] committed block seq=${result.seq} (${result.byteLength} bytes)`);
+                    const result = await gateway.commit(baseKey, additions, removals);
+                    // Read-your-writes: advance the fold cursor past our own ops
+                    // so sync() does not re-emit them, and cache the REAL
+                    // content-hash revision the gateway returned.
+                    if (result.seq >= 0) {
+                        sinceSeq = result.seq;
+                        setLastSyncedSeq(sinceSeq);
+                    }
+                    store.setRevision(result.revision);
+                    console.log(
+                        `[hypercore-link-language] committed ${additions.length} add / ` +
+                        `${removals.length} remove → revision=${result.revision.substring(0, 12)}... seq=${result.seq}`,
+                    );
+                    emitPerspectiveDiff(diff);
+                    return result.revision;
                 } catch (err) {
-                    console.error(`[hypercore-link-language] gateway append failed:`, err);
+                    console.error(`[hypercore-link-language] gateway commit failed:`, err);
+                    emitPerspectiveDiff(diff);
+                    return "";
                 }
-
-                emitPerspectiveDiff(diff);
-                return "";
             }
 
-            // 6. Legacy signal mode: build and serialize the commit block
+            // 6. Legacy signal mode: build and serialize the commit block, then
+            //    relay it via an executor append signal. This path has no
+            //    Autobase, so it cannot produce a convergent content-hash
+            //    revision — legacySeq is only the local append counter for the
+            //    signal protocol and is deliberately NOT reported as a revision.
             const result = commitDiff(diff, {
-                seq: currentSeq,
+                seq: legacySeq,
                 author: myDid,
                 hashFn: hash,
                 shouldCommit,
             });
 
             if (result) {
-                emitAppend(feedKey, result.serialized, currentSeq);
-                currentSeq++;
-                store.setRevision((currentSeq - 1).toString());
+                emitAppend(baseKey, result.serialized, legacySeq);
+                legacySeq++;
             }
 
             // 7. Emit the perspective diff for local subscribers
@@ -406,10 +442,42 @@ const language = defineLanguage({
         },
 
         async render() {
+            // Prefer the gateway's authoritative folded link set (Role A); the
+            // local KV is only a derived cache. Fall back to the cache if the
+            // gateway is unreachable.
+            if (gatewayMode && configured && baseKey) {
+                const gateway = getGateway();
+                if (gateway) {
+                    try {
+                        const { links } = await gateway.links(baseKey);
+                        return { links: links as LinkExpression[] };
+                    } catch (err) {
+                        console.warn(`[hypercore-link-language] render: gateway links failed, using cache:`, err);
+                    }
+                }
+            }
             return store.allLinks();
         },
 
         async currentRevision() {
+            // The real content-hash revision is the Autobase linearized Merkle
+            // head, fetched from the gateway. It is deterministic and identical
+            // across converged replicas — never a sequence number. The cached
+            // value (last commit's revision) is only a fallback when offline.
+            if (gatewayMode && configured && baseKey) {
+                const gateway = getGateway();
+                if (gateway) {
+                    try {
+                        const { revision } = await gateway.revision(baseKey);
+                        if (revision) {
+                            store.setRevision(revision);
+                            return revision;
+                        }
+                    } catch (err) {
+                        console.warn(`[hypercore-link-language] currentRevision: gateway revision failed, using cache:`, err);
+                    }
+                }
+            }
             return store.getRevision() || "";
         },
     },
@@ -545,7 +613,7 @@ export async function handleSignal(signalData: string): Promise<void> {
 
     if (result.kind === "block" && linkCallback) {
         const blockData = result.block.data;
-        const { deserializeCommitBlock } = await import("./src/commit-block.pure.js");
+        const { deserializeCommitBlock } = await import("./src/commit-block.js");
         const commitBlock = deserializeCommitBlock(blockData);
         if (commitBlock) {
             const diff: PerspectiveDiff = {

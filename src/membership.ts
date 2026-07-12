@@ -81,6 +81,15 @@ export function listWriters(): Array<{ feedKey: string; agentDid: string; addedA
 }
 
 /**
+ * Get just the hex feed keys of all known writers.
+ *
+ * Used to authorise peer input feeds into the gateway's Autobase during init.
+ */
+export function listWriterKeys(): string[] {
+    return listWriters().map((w) => w.feedKey).filter(isValidWriterKey);
+}
+
+/**
  * Get the agent DID associated with a writer feed key.
  */
 export function getWriterDid(feedKey: string): string | null {

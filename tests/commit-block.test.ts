@@ -151,25 +151,42 @@ describe("deserializeCommitBlock", () => {
 });
 
 // ---------------------------------------------------------------------------
-// computeBlockHash
+// computeBlockHash — a real content-address hash over the full block content
 // ---------------------------------------------------------------------------
+
+// Deterministic test hash (djb2 → hex). Stands in for the runtime's
+// content-address hash so we can test the hashing logic without the runtime.
+function testHash(data: string): string {
+    let h = 5381;
+    for (let i = 0; i < data.length; i++) {
+        h = ((h << 5) + h + data.charCodeAt(i)) | 0;
+    }
+    return `test${(h >>> 0).toString(16)}`;
+}
 
 describe("computeBlockHash", () => {
     it("produces deterministic output", () => {
         const block = makeCommitBlock();
-        assert.equal(computeBlockHash(block), computeBlockHash(block));
+        assert.equal(computeBlockHash(block, testHash), computeBlockHash(block, testHash));
     });
 
     it("differs for different blocks", () => {
         const block1 = makeCommitBlock({ seq: 0 });
         const block2 = makeCommitBlock({ seq: 1 });
-        assert.notEqual(computeBlockHash(block1), computeBlockHash(block2));
+        assert.notEqual(computeBlockHash(block1, testHash), computeBlockHash(block2, testHash));
     });
 
     it("differs for different authors", () => {
         const block1 = makeCommitBlock({ author: "a" });
         const block2 = makeCommitBlock({ author: "b" });
-        assert.notEqual(computeBlockHash(block1), computeBlockHash(block2));
+        assert.notEqual(computeBlockHash(block1, testHash), computeBlockHash(block2, testHash));
+    });
+
+    it("differs when the actual link content differs (not just counts)", () => {
+        // Same number of additions, different link — must hash differently.
+        const block1 = makeCommitBlock({ additions: [makeLinkExpression({ data: { source: "a://1", target: "t", predicate: "p" } })] });
+        const block2 = makeCommitBlock({ additions: [makeLinkExpression({ data: { source: "a://2", target: "t", predicate: "p" } })] });
+        assert.notEqual(computeBlockHash(block1, testHash), computeBlockHash(block2, testHash));
     });
 });
 
