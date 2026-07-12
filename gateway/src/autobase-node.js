@@ -25,10 +25,13 @@
  *   - addWriter(key)    → host.addWriter(key): a control op that authorises a
  *                         new agent's input feed into the linearization.
  *
- * `revision()` returns `await base.hash()` — the Merkle tree hash of Autobase's
- * linearized system core. This is a real content hash of the DAG head(s):
- * deterministic for a given linearized state and order-independent across
- * replication orders. It is NOT a sequence number.
+ * `revision()` returns a SHA-256 over the resolved OR-Set state — the sorted set
+ * of live link hashes produced by folding the authoritative op-log. This is a
+ * pure function of the observable link set, so it is deterministic and stable
+ * for unchanged state and order-independent across replication orders. It is
+ * NOT `base.hash()` (the Autobase view-core merkle, which drifts with the
+ * indexer/ack flush cadence and so is not stable between reads of a settled
+ * state), and NOT a sequence number.
  */
 
 import Corestore from 'corestore'
@@ -36,6 +39,7 @@ import Autobase from 'autobase'
 import Hyperbee from 'hyperbee'
 import Hyperswarm from 'hyperswarm'
 import b4a from 'b4a'
+import { createHash } from 'crypto'
 
 // ---------------------------------------------------------------------------
 // Operation model
@@ -116,19 +120,25 @@ export class AutobaseNode {
   }
 
   /**
-   * The AD4M `currentRevision`: a real content hash of the linearized DAG head.
+   * The AD4M `currentRevision`: a real content hash of the resolved link set.
    *
-   * `base.hash()` = Merkle tree hash of Autobase's linearized system core.
-   * Deterministic for a given linearized state, identical across replicas that
-   * have converged, and stable across restarts for the same state. Returns null
-   * only before the system core has any indexed length (empty base) — callers
-   * treat null as the empty-state revision "".
+   * Folds the authoritative op-log to the live OR-Set (tombstones resolved),
+   * then SHA-256s the sorted set of live link hashes. Because it is a pure
+   * function of the observable link set — not `base.hash()`, the Autobase
+   * view-core merkle that advances as the indexer/acker flushes — it is:
+   *   - STABLE for unchanged state: identical on every read of a settled fold,
+   *     with no dependence on Autobase's flush/ack cadence (the old flake),
+   *   - order-independent: replicas that converge to the same link set compute
+   *     the same revision regardless of the order they linearized ops,
+   *   - a real 64-hex content hash, never a sequence number.
+   * The empty resolved set hashes to a fixed 64-hex digest, so an
+   * add-then-remove returns to the same revision as a never-written base.
    *
-   * @returns {Promise<string>} hex content hash, or "" for the empty base.
+   * @returns {Promise<string>} 64-hex content hash of the resolved link set.
    */
   async revision () {
-    const h = await this.base.hash()
-    return h ? b4a.toString(h, 'hex') : ''
+    const live = await this.links()
+    return resolvedStateDigest(live.map((e) => e.hash))
   }
 
   /**
@@ -309,7 +319,7 @@ export class AutobaseNode {
 /**
  * Autobase apply handler. Runs deterministically over the linearized nodes on
  * every writer, so all replicas that see the same ops produce byte-identical
- * views (hence identical `base.hash()`).
+ * views (hence identical folded link sets and identical resolvedStateDigest).
  *
  * @param {Array<{ value: unknown, from: unknown }>} nodes
  * @param {Hyperbee} view
@@ -385,9 +395,25 @@ function foldOplog (ops) {
   return [...live.entries()].map(([hash, link]) => ({ hash, link }))
 }
 
+/**
+ * Content hash of a resolved OR-Set state: SHA-256 over the sorted set of live
+ * link hashes. Order-independent (sorted) and a pure function of the observable
+ * link set, so two replicas that converge to the same set — in any replication
+ * order — compute the same 64-hex digest. The empty set has a fixed, non-empty
+ * digest, so it is never mistaken for a sequence number or the empty string.
+ *
+ * @param {Iterable<string>} liveHashes  the live link hashes (foldOplog output)
+ * @returns {string} lowercase hex SHA-256
+ */
+function resolvedStateDigest (liveHashes) {
+  const sorted = [...liveHashes].sort()
+  return createHash('sha256').update(JSON.stringify(sorted)).digest('hex')
+}
+
 export {
   applyOps,
   foldOplog,
+  resolvedStateDigest,
   OP_ADD,
   OP_REMOVE,
   OP_ADD_WRITER,

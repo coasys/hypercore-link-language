@@ -93,6 +93,38 @@ test('revision is a real content hash (not a seq), changes with content, stable'
   assert.equal(rev1again, rev1, 'revision must be stable for an unchanged state')
 })
 
+// Regression: the revision must be byte-identical across MANY reads of an
+// unchanged state, even with a linearization update() between each read (what
+// the /revision route does). The prior base.hash() revision drifted here as
+// Autobase's indexer/acker flushed the view core, so two consecutive reads
+// could differ; the resolved-state digest is a pure function of the folded link
+// set and must not move.
+test('revision is byte-identical across many reads of unchanged state', async (t) => {
+  const root = tmpDir()
+  const { A, B, streams } = await twoWriters(root)
+  t.after(async () => { streams.a.destroy(); streams.b.destroy(); await A.close(); await B.close(); fs.rmSync(root, { recursive: true, force: true }) })
+
+  const l1 = link('stable://1', 'v://1')
+  const l2 = link('stable://2', 'v://2')
+  await A.appendAdd(hashLinkExpression(l1), l1)
+  await B.appendAdd(hashLinkExpression(l2), l2)
+  await settleBoth(A, B)
+
+  const reads = []
+  for (let i = 0; i < 30; i++) {
+    await A.update()
+    reads.push(await A.revision())
+  }
+  const distinct = new Set(reads)
+  assert.equal(distinct.size, 1,
+    `revision must be identical across reads; saw ${distinct.size} distinct: ${[...distinct].join(', ')}`)
+  assert.match(reads[0], /^[0-9a-f]{64}$/)
+
+  // Converged replicas compute the identical revision.
+  await B.update()
+  assert.equal(await B.revision(), reads[0], 'converged replicas compute identical revision')
+})
+
 // ---------------------------------------------------------------------------
 // §5.2 — the op-log (DAG) is authoritative: folding it reproduces the link set
 // ---------------------------------------------------------------------------

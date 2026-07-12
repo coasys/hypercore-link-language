@@ -5,10 +5,11 @@ An AD4M link language that syncs Perspective triples over a Hypercore
 replicated across peers via Hyperswarm.
 
 This language honours AD4M's `perspective-sync` contract with a genuine
-hash-linked diff-DAG: `currentRevision()` returns the Autobase linearized
-Merkle head hash (a real content hash, identical across converged replicas —
-never a sequence number), and removals are first-class OR-Set ops that converge
-against the exact add they cancel.
+hash-linked diff-DAG: `currentRevision()` returns a content hash of the resolved
+link set (the SHA-256 of the sorted live OR-Set hashes, folded from the
+authoritative Autobase op-log) — a real content hash, identical across converged
+replicas, never a sequence number — and removals are first-class OR-Set ops that
+converge against the exact add they cancel.
 
 ## Convergence model
 
@@ -19,8 +20,10 @@ riding Autobase:
 - **Role A — convergence substrate (authoritative):** an Autobase, one per
   neighbourhood. Each agent writes its own PerspectiveDiff ops (add/remove,
   keyed by the link's content hash) to its own input feed. Autobase linearizes
-  all writers into a single deterministic op-log (the DAG). The linearized
-  Merkle head is the revision.
+  all writers into a single deterministic op-log (the DAG). The revision is a
+  content hash of the resolved OR-Set state folded from that op-log — a pure
+  function of the observable link set, so it is stable across reads and
+  independent of Autobase's indexer/ack flush cadence.
 - **Role B — native projection (derived):** the materialised link set, folded
   from the authoritative op-log as an OR-Set. The language's local KV store is a
   derived read cache of this projection, rebuilt by folding gateway diffs. It is
@@ -87,8 +90,9 @@ Gateway (native Autobase, run with plain Node):
 cd gateway && npm test
 ```
 
-7 gateway tests, including two-writer in-process Autobase convergence
-(`gateway/tests/convergence.test.js`): real content-hash revision, order-
+8 gateway tests, including two-writer in-process Autobase convergence
+(`gateway/tests/convergence.test.js`): real content-hash revision, revision
+byte-identical across many reads of unchanged state (no view-core drift), order-
 independent identical revision hash, removal convergence, DAG-fold ≡ link set,
 and multi-writer authorisation.
 
@@ -116,7 +120,9 @@ Language (`src/`) — no `ad4m:host` imports except the two Deno adapter files:
 Gateway (`gateway/src/`) — Node.js, native Holepunch stack:
 
 - `autobase-node.js` — wraps Corestore + Autobase; maintains the authoritative
-  op-log and the derived OR-Set view; `revision()` = `await base.hash()`.
+  op-log and the derived OR-Set view; `revision()` = `resolvedStateDigest` over
+  the sorted live link hashes (a pure function of the folded set, not the
+  jittery `base.hash()` view-core merkle).
 - `state.js` — one AutobaseNode per base key.
 - `routes.js` / `server.js` — the REST handlers and HTTP server.
 - `link-hash.js` — the gateway's fallback canonical link hash (for bare links).

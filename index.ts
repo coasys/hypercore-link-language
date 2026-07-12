@@ -56,11 +56,11 @@ import type { HashedLink } from "./src/transport.js";
 import {
     initTelepresence,
     resetTelepresence,
-    setOnlineStatus as telepresenceSetOnlineStatus,
-    getOnlineAgents as telepresenceGetOnlineAgents,
-    sendSignal as telepresenceSendSignal,
-    sendBroadcast as telepresenceSendBroadcast,
-    registerSignalCallback as telepresenceRegisterSignalCallback,
+    setOnlineStatus as tpSetOnlineStatus,
+    getOnlineAgents as tpGetOnlineAgents,
+    sendSignal as tpSendSignal,
+    sendBroadcast as tpSendBroadcast,
+    registerSignalCallback as tpRegisterSignalCallback,
     pollInbox,
 } from "./src/telepresence.js";
 
@@ -520,23 +520,23 @@ const language = defineLanguage({
     // -----------------------------------------------------------------------
     telepresence: {
         async setOnlineStatus(status: unknown): Promise<void> {
-            return telepresenceSetOnlineStatus(status);
+            return tpSetOnlineStatus(status);
         },
 
         async getOnlineAgents(): Promise<unknown[]> {
-            return telepresenceGetOnlineAgents();
+            return tpGetOnlineAgents();
         },
 
         async sendSignal(remoteDid: string, payload: unknown): Promise<object> {
-            return telepresenceSendSignal(remoteDid, payload);
+            return tpSendSignal(remoteDid, payload);
         },
 
         async sendBroadcast(payload: unknown): Promise<object> {
-            return telepresenceSendBroadcast(payload);
+            return tpSendBroadcast(payload);
         },
 
         async registerSignalCallback(callback: any): Promise<void> {
-            return telepresenceRegisterSignalCallback(callback);
+            return tpRegisterSignalCallback(callback);
         },
     },
 });

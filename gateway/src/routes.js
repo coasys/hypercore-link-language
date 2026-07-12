@@ -60,23 +60,22 @@ function err (res, status, message) {
 }
 
 /**
- * Wait until the local writer's latest append is linearized into the view, so
- * commit responses are read-your-writes. We poll the revision until it stops
- * changing (or a short deadline), which means the append has been applied.
+ * Read-your-writes: wait until the just-committed ops are observable in the
+ * resolved fold — every appended add present, every appended remove absent.
+ *
+ * This is defined over the observable link set (exactly what `revision()`
+ * hashes), NOT a jittery view-core hash, so it settles precisely when the ops
+ * linearize and the revision it returns is immediately stable across every
+ * subsequent read. Called with no expected hashes (e.g. after addWriter) it
+ * returns as soon as one linearization pass completes.
  */
-async function settle (node, deadlineMs = 4000) {
+async function settle (node, adds = [], removes = [], deadlineMs = 4000) {
   const start = Date.now()
-  let last = await node.revision()
-  let stable = 0
   while (Date.now() - start < deadlineMs) {
     await node.update()
-    const rev = await node.revision()
-    if (rev === last && rev !== '') {
-      stable++
-      if (stable >= 2) return rev
-    } else {
-      stable = 0
-      last = rev
+    const live = new Set((await node.links()).map((e) => e.hash))
+    if (adds.every((h) => live.has(h)) && removes.every((h) => !live.has(h))) {
+      return node.revision()
     }
     await new Promise((r) => setTimeout(r, 15))
   }
@@ -200,16 +199,20 @@ export function commit (state) {
     // agree on the OR-Set key. Bare LinkExpressions (no wrapper) fall back to
     // the gateway's canonical hash. A removal thus references the EXACT hash of
     // the add, so it converges against that add across replicas.
+    const addHashes = []
+    const removeHashes = []
     for (const entry of additions) {
       const { link, hash } = normaliseEntry(entry)
+      addHashes.push(hash)
       await node.appendAdd(hash, link)
     }
     for (const entry of removals) {
       const { link, hash } = normaliseEntry(entry)
+      removeHashes.push(hash)
       await node.appendRemove(hash, link)
     }
 
-    const revision = await settle(node)
+    const revision = await settle(node, addHashes, removeHashes)
     const ops = await node.oplog()
     const maxSeq = ops.length > 0 ? ops[ops.length - 1].seq : -1
     json(res, 200, { revision, seq: maxSeq })
